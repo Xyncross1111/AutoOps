@@ -2,8 +2,4 @@
   auto_https disable_redirects
 }
 
-:80, :443 {
-  respond "AutoOps edge is ready for managed app routes." 200
-}
-
 import /etc/caddy/sites/*.caddy

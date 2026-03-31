@@ -231,13 +231,25 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
         ],
         { onOutput: args.onOutput }
       );
+      const composeFileArgs = [
+        "-f",
+        shellQuote(args.composeFile),
+        "-f",
+        shellQuote(remoteOverridePath)
+      ];
+      const composePullCommand = `if command -v docker-compose >/dev/null 2>&1; then docker-compose ${composeFileArgs.join(" ")} pull ${shellQuote(
+        args.service
+      )}; else docker compose ${composeFileArgs.join(" ")} pull ${shellQuote(
+        args.service
+      )}; fi`;
+      const composeUpCommand = `if command -v docker-compose >/dev/null 2>&1; then docker-compose ${composeFileArgs.join(" ")} up -d ${shellQuote(
+        args.service
+      )}; else docker compose ${composeFileArgs.join(" ")} up -d ${shellQuote(
+        args.service
+      )}; fi`;
       const remoteCommand = [
-        `docker compose -f ${shellQuote(args.composeFile)} -f ${shellQuote(
-          remoteOverridePath
-        )} pull ${shellQuote(args.service)}`,
-        `docker compose -f ${shellQuote(args.composeFile)} -f ${shellQuote(
-          remoteOverridePath
-        )} up -d ${shellQuote(args.service)}`,
+        composePullCommand,
+        composeUpCommand,
         `rm -f ${shellQuote(remoteOverridePath)}`
       ].join(" && ");
       await this.exec(
@@ -305,10 +317,8 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
       "utf8"
     );
 
-    await this.exec(
-      "docker",
+    await this.runComposeCommand(
       [
-        "compose",
         "-p",
         `autoops-${args.appSlug}`,
         "-f",
@@ -372,6 +382,25 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
 
   async cleanupPath(path: string): Promise<void> {
     await rm(path, { recursive: true, force: true });
+  }
+
+  private async runComposeCommand(
+    args: string[],
+    options: ExecOptions = {}
+  ): Promise<void> {
+    try {
+      await this.exec("docker-compose", args, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (
+        message.includes("spawn docker-compose ENOENT") ||
+        message.includes("not found")
+      ) {
+        await this.exec("docker", ["compose", ...args], options);
+        return;
+      }
+      throw error;
+    }
   }
 
   private async ensureDockerNetwork(

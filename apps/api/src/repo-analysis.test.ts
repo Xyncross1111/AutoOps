@@ -33,6 +33,32 @@ describe("analyzeRepository", () => {
     expect(result.managedConfig?.buildCommand).toBe("npm run build");
   });
 
+  it("uses pnpm build for pnpm-managed Next.js repos", () => {
+    const result = analyzeRepository({
+      repository: baseRepository,
+      packageJson: JSON.stringify({
+        packageManager: "pnpm@9.0.0",
+        scripts: {
+          build: "next build",
+          start: "next start"
+        },
+        dependencies: {
+          next: "15.0.0",
+          react: "19.0.0"
+        }
+      }),
+      hasPnpmWorkspace: false,
+      hasTurboJson: false,
+      hasNxJson: false,
+      hasPackageLock: false,
+      hasPnpmLock: false,
+      hasYarnLock: false
+    });
+
+    expect(result.packageManager).toBe("pnpm");
+    expect(result.managedConfig?.buildCommand).toBe("pnpm build");
+  });
+
   it("rejects workspace repositories", () => {
     const result = analyzeRepository({
       repository: baseRepository,

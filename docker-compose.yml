@@ -71,6 +71,7 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     networks:
+      - default
       - managed
 
 volumes:

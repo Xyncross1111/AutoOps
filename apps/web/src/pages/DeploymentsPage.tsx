@@ -1,5 +1,5 @@
 import { startTransition, type ReactNode, useEffect, useState } from "react";
-import { GitBranch, LifeBuoy, ShieldAlert } from "lucide-react";
+import { GitBranch, LifeBuoy, ShieldAlert, TerminalSquare } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import type {
   DeploymentRevisionSummary,
@@ -10,8 +10,14 @@ import type {
 import { useAppSession } from "../app-context";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState, InlineError, LoadingBlock } from "../components/States";
+import { useRunStream } from "../hooks/useRunStream";
 import { getDeploymentTarget, listDeployments, rollbackToRevision } from "../lib/api";
-import { formatDateTime, formatRelativeTime, shortSha } from "../lib/format";
+import {
+  formatDateTime,
+  formatRelativeTime,
+  shortSha,
+  titleCase
+} from "../lib/format";
 
 export function DeploymentsPage() {
   const { token, refreshNonce, refreshApp } = useAppSession();
@@ -24,8 +30,10 @@ export function DeploymentsPage() {
   const [error, setError] = useState("");
   const [rollbackError, setRollbackError] = useState("");
   const [rollingBackId, setRollingBackId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   const selectedTargetId = searchParams.get("target");
+  const runsFromQueryParam = searchParams.get("run");
 
   useEffect(() => {
     let active = true;
@@ -62,6 +70,7 @@ export function DeploymentsPage() {
   useEffect(() => {
     if (!selectedTargetId) {
       setDetail(null);
+      setSelectedRunId(null);
       return;
     }
 
@@ -100,6 +109,47 @@ export function DeploymentsPage() {
       });
     }
   }, [selectedTargetId, setSearchParams, targets]);
+
+  useEffect(() => {
+    if (!detail) {
+      setSelectedRunId(null);
+      return;
+    }
+
+    const validRunIds = new Set(detail.linkedRuns.map((run) => run.id));
+    const requestedRunId = runsFromQueryParam ?? null;
+
+    if (requestedRunId && validRunIds.has(requestedRunId)) {
+      setSelectedRunId(requestedRunId);
+      return;
+    }
+
+    const activeRun = detail.linkedRuns.find((run) => run.status === "running");
+    const fallbackRun = activeRun ?? detail.linkedRuns[0];
+    setSelectedRunId(fallbackRun?.id ?? null);
+  }, [detail, runsFromQueryParam]);
+
+  const stream = useRunStream(token, selectedRunId, (updatedRun) => {
+    setDetail((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        linkedRuns: current.linkedRuns.map((run) => {
+          if (run.id === updatedRun.id) {
+            return updatedRun;
+          }
+          return run;
+        })
+      };
+    });
+  });
+
+  const selectedRunForStream = stream.detail?.run ?? detail?.linkedRuns.find(
+    (run) => run.id === selectedRunId
+  ) ?? null;
 
   async function handleRollback(targetId: string, revisionId: string) {
     setRollingBackId(revisionId);
@@ -263,7 +313,20 @@ export function DeploymentsPage() {
                 {detail.linkedRuns.length > 0 ? (
                   <div className="stack-list">
                     {detail.linkedRuns.map((run) => (
-                      <div className="list-row" key={run.id}>
+                      <button
+                        type="button"
+                        className={`list-row${selectedRunId === run.id ? " selected" : ""}`}
+                        key={run.id}
+                        onClick={() => {
+                          setSelectedRunId(run.id);
+                          startTransition(() => {
+                            setSearchParams({
+                              target: selectedTargetId ?? detail.target.id,
+                              run: run.id
+                            });
+                          });
+                        }}
+                      >
                         <div>
                           <strong>{run.projectName}</strong>
                           <p>
@@ -274,13 +337,102 @@ export function DeploymentsPage() {
                           <StatusBadge status={run.status} tone="subtle" />
                           <small>{formatRelativeTime(run.queuedAt)}</small>
                         </div>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 ) : (
                   <EmptyState
                     title="No linked runs"
                     description="This target does not have revisions linked back to recorded run IDs."
+                  />
+                )}
+              </div>
+
+              <div className="panel-card inset-card">
+                <div className="panel-heading compact">
+                  <div>
+                    <p className="eyebrow">Live deployment logs</p>
+                    <h3>{selectedRunForStream?.projectName ?? "Select a run"}</h3>
+                  </div>
+                  <TerminalSquare size={18} />
+                </div>
+
+                {selectedRunId ? (
+                  <>
+                    {!stream.detail && stream.isLoading ? (
+                      <LoadingBlock label="Loading run detail..." />
+                    ) : stream.error ? (
+                      <InlineError message={stream.error} />
+                    ) : stream.detail ? (
+                      <div className="detail-stack">
+                        <div className="meta-grid">
+                          <MetaItem
+                            label="Status"
+                            value={<StatusBadge status={selectedRunForStream?.status ?? "queued"} />}
+                          />
+                          <MetaItem
+                            label="Source"
+                            value={titleCase(selectedRunForStream?.source ?? "manual_deploy")}
+                          />
+                          <MetaItem label="Branch" value={selectedRunForStream?.branch ?? "Unknown"} />
+                          <MetaItem
+                            label="Commit"
+                            value={<code>{selectedRunForStream?.commitSha ?? "N/A"}</code>}
+                          />
+                          <MetaItem
+                            label="Started"
+                            value={formatDateTime(
+                              selectedRunForStream?.startedAt ?? selectedRunForStream?.queuedAt ?? null
+                            )}
+                          />
+                          <MetaItem
+                            label="Finished"
+                            value={formatDateTime(selectedRunForStream?.finishedAt ?? null)}
+                          />
+                        </div>
+
+                        {stream.detail.stages.length > 0 ? (
+                          <div className="timeline-grid">
+                            {stream.detail.stages.map((stage) => (
+                              <div className="timeline-stage" key={stage.id}>
+                                <div className="row-spread">
+                                  <strong>{stage.stageName}</strong>
+                                  <StatusBadge status={stage.status} tone="subtle" />
+                                </div>
+                                <small>
+                                  {stage.startedAt ? formatRelativeTime(stage.startedAt) : "Not started"}
+                                </small>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        <div className="log-panel">
+                          {stream.logs.length > 0 ? (
+                            stream.logs.map((entry) => (
+                              <div className="log-line" key={entry.id}>
+                                <span>{entry.stageName}</span>
+                                <span>{entry.message}</span>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="log-empty">
+                              Log output will appear here while this deployment is running.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <EmptyState
+                        title="No stream detail"
+                        description="Run detail is not yet available for this deployment."
+                      />
+                    )}
+                  </>
+                ) : (
+                  <EmptyState
+                    title="No linked run selected"
+                    description="Choose a linked run above to inspect its live logs and execution context."
                   />
                 )}
               </div>

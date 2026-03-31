@@ -1,5 +1,5 @@
 FROM node:21-bookworm-slim AS base
-RUN apt-get update && apt-get install -y git openssh-client docker.io && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git openssh-client docker.io docker-compose && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/worker/package.json ./apps/worker/package.json

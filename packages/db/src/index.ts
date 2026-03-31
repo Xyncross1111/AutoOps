@@ -1888,11 +1888,27 @@ export class AutoOpsDb {
     const linkedRunIds = [...new Set(revisions.flatMap((revision) => (
       revision.runId ? [revision.runId] : []
     )))];
+    const [recentProjectRuns, revisionRuns] = await Promise.all([
+      this.listRuns({
+        projectId: target.projectId,
+        limit: 25
+      }),
+      this.listRunsByIds(linkedRunIds)
+    ]);
+    const runById = new Map<string, PipelineRunSummary>();
+
+    for (const run of [...revisionRuns, ...recentProjectRuns]) {
+      runById.set(run.id, run);
+    }
+
+    const linkedRuns = Array.from(runById.values()).sort((left, right) =>
+      new Date(right.queuedAt).getTime() - new Date(left.queuedAt).getTime()
+    );
 
     return {
       target,
       revisions,
-      linkedRuns: await this.listRunsByIds(linkedRunIds)
+      linkedRuns
     };
   }
 
