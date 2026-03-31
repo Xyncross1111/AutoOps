@@ -12,5 +12,4 @@ COPY packages/db ./packages/db
 
 RUN pnpm --filter @autoops/api build
 
-CMD ["pnpm", "--filter", "@autoops/api", "dev"]
-
+CMD ["pnpm", "--filter", "@autoops/api", "exec", "tsx", "src/index.ts"]

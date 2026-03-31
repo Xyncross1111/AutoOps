@@ -153,3 +153,74 @@ export interface QueuedRunMetadata {
   manualRollback?: ManualRollbackMetadata;
 }
 
+export interface ProjectInstallationSummary {
+  installationId: number;
+  accountLogin: string;
+  accountType: string;
+  updatedAt: string;
+}
+
+export interface RunListFilters {
+  projectId?: string;
+  status?: RunStatus;
+  source?: RunSource;
+  search?: string;
+  limit?: number;
+}
+
+export interface ProjectUpdateInput {
+  name?: string;
+  defaultBranch?: string;
+  configPath?: string;
+  secrets?: Record<string, string>;
+}
+
+export interface ProjectDetail {
+  project: ProjectSummary;
+  recentRuns: PipelineRunSummary[];
+  deploymentTargets: DeploymentTargetSummary[];
+  installation: ProjectInstallationSummary | null;
+  secretNames: string[];
+}
+
+export interface DeploymentTargetDetail {
+  target: DeploymentTargetSummary;
+  revisions: DeploymentRevisionSummary[];
+  linkedRuns: PipelineRunSummary[];
+}
+
+export type ActivityEventKind = "audit" | "webhook";
+
+export interface ActivityEvent {
+  id: string;
+  kind: ActivityEventKind;
+  title: string;
+  description: string;
+  status: string;
+  occurredAt: string;
+  actor: string | null;
+  entityType: string | null;
+  entityId: string | null;
+  projectId: string | null;
+  runId: string | null;
+  targetId: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface DashboardOverview {
+  metrics: {
+    projectCount: number;
+    queuedRunCount: number;
+    runningRunCount: number;
+    successRate7d: number;
+    unhealthyTargetCount: number;
+  };
+  attention: {
+    latestFailedRun: PipelineRunSummary | null;
+    activeRuns: PipelineRunSummary[];
+    unhealthyTargets: DeploymentTargetSummary[];
+  };
+  recentRuns: PipelineRunSummary[];
+  recentDeployments: DeploymentRevisionSummary[];
+  recentActivity: ActivityEvent[];
+}

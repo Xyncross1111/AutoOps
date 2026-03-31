@@ -29,9 +29,30 @@ const createProjectSchema = z.object({
   secrets: z.record(z.string()).optional()
 });
 
+const updateProjectSchema = z.object({
+  name: z.string().min(1).optional(),
+  defaultBranch: z.string().min(1).optional(),
+  configPath: z.string().min(1).optional(),
+  secrets: z.record(z.string()).optional()
+});
+
 const rollbackSchema = z.object({
   targetId: z.string().uuid(),
   revisionId: z.string().uuid()
+});
+
+const runFiltersSchema = z.object({
+  projectId: z.string().uuid().optional(),
+  status: z.enum(["queued", "running", "succeeded", "failed", "cancelled", "superseded"]).optional(),
+  source: z.enum(["push", "rerun", "manual_rollback"]).optional(),
+  search: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().positive().max(250).default(100)
+});
+
+const activityQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(250).default(50),
+  kind: z.enum(["audit", "webhook"]).optional(),
+  status: z.string().trim().min(1).optional()
 });
 
 export function createApp(args: {
@@ -98,6 +119,12 @@ export function createApp(args: {
     res.json({ user: req.user });
   });
 
+  app.get("/api/dashboard/overview", asyncRoute(async (_req, res) => {
+    res.json({
+      overview: await db.getDashboardOverview()
+    });
+  }));
+
   app.get("/api/github/install-url", (_req, res) => {
     res.json({
       url: github.getInstallUrl()
@@ -148,9 +175,67 @@ export function createApp(args: {
     res.json({ projects: await db.listProjects() });
   }));
 
+  app.get("/api/projects/:id", asyncRoute(async (req, res) => {
+    const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const detail = await db.getProjectDetail(projectId);
+    if (!detail) {
+      res.status(404).json({ error: "Project not found." });
+      return;
+    }
+    res.json(detail);
+  }));
+
+  app.patch("/api/projects/:id", asyncRoute(async (req, res) => {
+    const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const parsed = updateProjectSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    const encryptedSecrets = parsed.data.secrets
+      ? Object.fromEntries(
+          Object.entries(parsed.data.secrets).map(([name, value]) => [
+            name,
+            encryptSecret(value, config.SECRET_MASTER_KEY)
+          ])
+        )
+      : undefined;
+
+    const project = await db.updateProject(projectId, {
+      name: parsed.data.name,
+      defaultBranch: parsed.data.defaultBranch,
+      configPath: parsed.data.configPath,
+      secrets: encryptedSecrets
+    });
+
+    if (!project) {
+      res.status(404).json({ error: "Project not found." });
+      return;
+    }
+
+    await db.writeAuditLog(
+      req.user?.email ?? "unknown",
+      "project.updated",
+      "project",
+      project.id,
+      {
+        projectId: project.id,
+        updatedFields: Object.keys(parsed.data).sort()
+      }
+    );
+
+    res.json({ project });
+  }));
+
   app.get("/api/runs", asyncRoute(async (req, res) => {
-    const limit = Number(req.query.limit ?? 100);
-    res.json({ runs: await db.listRuns(Number.isFinite(limit) ? limit : 100) });
+    const parsed = runFiltersSchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    res.json({ runs: await db.listRuns(parsed.data) });
   }));
 
   app.get("/api/runs/:id", asyncRoute(async (req, res) => {
@@ -232,6 +317,16 @@ export function createApp(args: {
     });
   }));
 
+  app.get("/api/deployments/targets/:id", asyncRoute(async (req, res) => {
+    const targetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const detail = await db.getDeploymentTargetDetail(targetId);
+    if (!detail) {
+      res.status(404).json({ error: "Deployment target not found." });
+      return;
+    }
+    res.json(detail);
+  }));
+
   app.post("/api/rollbacks", asyncRoute(async (req, res) => {
     const parsed = rollbackSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -250,6 +345,18 @@ export function createApp(args: {
       parsed.data
     );
     res.status(202).json({ run });
+  }));
+
+  app.get("/api/activity", asyncRoute(async (req, res) => {
+    const parsed = activityQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    res.json({
+      events: await db.listActivityEvents(parsed.data)
+    });
   }));
 
   app.post("/webhooks/github", asyncRoute(async (req, res) => {

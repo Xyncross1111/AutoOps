@@ -3,14 +3,21 @@ import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type {
+  ActivityEvent,
+  DashboardOverview,
   DeploymentRevisionSummary,
+  DeploymentTargetDetail,
   DeploymentTargetSummary,
   PipelineConfig,
   PipelineRunSummary,
+  ProjectDetail,
+  ProjectInstallationSummary,
   ProjectSummary,
+  ProjectUpdateInput,
   QueuedRunMetadata,
   RollbackRequest,
   RunLogEntry,
+  RunListFilters,
   RunSource,
   RunStatus,
   StageRun,
@@ -221,6 +228,35 @@ interface DeploymentRevisionRow {
   rollback_of_revision_id: string | null;
 }
 
+interface InstallationRow {
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  updated_at: string;
+}
+
+interface AuditLogRow {
+  id: number;
+  actor: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  metadata: JsonRecord;
+  created_at: string;
+}
+
+interface WebhookActivityRow {
+  delivery_id: string;
+  event_name: string;
+  status: string;
+  run_id: string | null;
+  error_message: string | null;
+  created_at: string;
+  repo_owner: string | null;
+  repo_name: string | null;
+  project_id: string | null;
+}
+
 export interface CreateProjectInput {
   name: string;
   repoOwner: string;
@@ -272,7 +308,18 @@ export class AutoOpsDb {
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query(SCHEMA_SQL);
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("SELECT pg_advisory_lock($1, $2)", [57421, 1]);
+      await client.query(SCHEMA_SQL);
+    } finally {
+      try {
+        await client.query("SELECT pg_advisory_unlock($1, $2)", [57421, 1]);
+      } finally {
+        client.release();
+      }
+    }
   }
 
   async healthcheck(): Promise<boolean> {
@@ -358,6 +405,28 @@ export class AutoOpsDb {
     return result.rows[0] ? mapProjectSummary(result.rows[0]) : null;
   }
 
+  async getProjectDetail(projectId: string): Promise<ProjectDetail | null> {
+    const project = await this.getProject(projectId);
+    if (!project) {
+      return null;
+    }
+
+    const [recentRuns, deploymentTargets, installation, secrets] = await Promise.all([
+      this.listRuns({ projectId, limit: 10 }),
+      this.listDeploymentTargets(projectId),
+      this.getGitHubInstallation(project.installationId),
+      this.listProjectSecrets(projectId)
+    ]);
+
+    return {
+      project,
+      recentRuns,
+      deploymentTargets,
+      installation,
+      secretNames: Object.keys(secrets).sort()
+    };
+  }
+
   async createProject(input: CreateProjectInput): Promise<ProjectSummary> {
     const id = randomUUID();
     await this.pool.query(
@@ -390,6 +459,57 @@ export class AutoOpsDb {
       throw new Error("Failed to load created project.");
     }
     return created;
+  }
+
+  async updateProject(
+    projectId: string,
+    input: ProjectUpdateInput
+  ): Promise<ProjectSummary | null> {
+    const updates: string[] = [];
+    const values: unknown[] = [];
+
+    if (input.name !== undefined) {
+      values.push(input.name);
+      updates.push(`name = $${values.length}`);
+    }
+    if (input.defaultBranch !== undefined) {
+      values.push(input.defaultBranch);
+      updates.push(`default_branch = $${values.length}`);
+    }
+    if (input.configPath !== undefined) {
+      values.push(input.configPath);
+      updates.push(`config_path = $${values.length}`);
+    }
+
+    if (updates.length > 0) {
+      values.push(projectId);
+      await this.pool.query(
+        `
+          UPDATE projects
+          SET ${updates.join(", ")},
+              updated_at = NOW()
+          WHERE id = $${values.length}
+        `,
+        values
+      );
+    }
+
+    const secretEntries = Object.entries(input.secrets ?? {});
+    if (secretEntries.length > 0) {
+      for (const [name, encryptedValue] of secretEntries) {
+        await this.upsertProjectSecret(projectId, name, encryptedValue);
+      }
+      await this.pool.query(
+        `
+          UPDATE projects
+          SET updated_at = NOW()
+          WHERE id = $1
+        `,
+        [projectId]
+      );
+    }
+
+    return this.getProject(projectId);
   }
 
   async upsertProjectSecret(
@@ -446,31 +566,30 @@ export class AutoOpsDb {
   }
 
   async listGitHubInstallations(): Promise<
-    Array<{
-      installationId: number;
-      accountLogin: string;
-      accountType: string;
-      updatedAt: string;
-    }>
+    ProjectInstallationSummary[]
   > {
-    const result = await this.pool.query<{
-      installation_id: number;
-      account_login: string;
-      account_type: string;
-      updated_at: string;
-    }>(
+    const result = await this.pool.query<InstallationRow>(
       `
         SELECT installation_id, account_login, account_type, updated_at
         FROM github_installations
         ORDER BY updated_at DESC
       `
     );
-    return result.rows.map((row) => ({
-      installationId: Number(row.installation_id),
-      accountLogin: row.account_login,
-      accountType: row.account_type,
-      updatedAt: row.updated_at
-    }));
+    return result.rows.map(mapInstallationSummary);
+  }
+
+  async getGitHubInstallation(
+    installationId: number
+  ): Promise<ProjectInstallationSummary | null> {
+    const result = await this.pool.query<InstallationRow>(
+      `
+        SELECT installation_id, account_login, account_type, updated_at
+        FROM github_installations
+        WHERE installation_id = $1
+      `,
+      [installationId]
+    );
+    return result.rows[0] ? mapInstallationSummary(result.rows[0]) : null;
   }
 
   async hasWebhookDelivery(deliveryId: string): Promise<boolean> {
@@ -581,7 +700,44 @@ export class AutoOpsDb {
     );
   }
 
-  async listRuns(limit = 100): Promise<PipelineRunSummary[]> {
+  async listRuns(filters: RunListFilters = {}): Promise<PipelineRunSummary[]> {
+    const values: unknown[] = [];
+    const clauses: string[] = [];
+    const {
+      projectId,
+      status,
+      source,
+      search,
+      limit = 100
+    } = filters;
+
+    if (projectId) {
+      values.push(projectId);
+      clauses.push(`r.project_id = $${values.length}`);
+    }
+    if (status) {
+      values.push(status);
+      clauses.push(`r.status = $${values.length}`);
+    }
+    if (source) {
+      values.push(source);
+      clauses.push(`r.source = $${values.length}`);
+    }
+    if (search) {
+      values.push(`%${search.toLowerCase()}%`);
+      clauses.push(`
+        (
+          LOWER(p.name) LIKE $${values.length}
+          OR LOWER(r.branch) LIKE $${values.length}
+          OR LOWER(r.commit_sha) LIKE $${values.length}
+          OR LOWER(r.triggered_by) LIKE $${values.length}
+        )
+      `);
+    }
+
+    values.push(limit);
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+
     const result = await this.pool.query<RunRow>(
       `
         SELECT
@@ -601,10 +757,11 @@ export class AutoOpsDb {
           r.metadata
         FROM pipeline_runs r
         INNER JOIN projects p ON p.id = r.project_id
+        ${where}
         ORDER BY r.queued_at DESC
-        LIMIT $1
+        LIMIT $${values.length}
       `,
-      [limit]
+      values
     );
     return result.rows.map(mapRunSummary);
   }
@@ -646,6 +803,39 @@ export class AutoOpsDb {
       pipelineConfig: row.pipeline_config,
       metadata: row.metadata ?? {}
     };
+  }
+
+  async listRunsByIds(runIds: string[]): Promise<PipelineRunSummary[]> {
+    if (runIds.length === 0) {
+      return [];
+    }
+
+    const result = await this.pool.query<RunRow>(
+      `
+        SELECT
+          r.id,
+          r.project_id,
+          p.name AS project_name,
+          r.source,
+          r.branch,
+          r.commit_sha,
+          r.status,
+          r.queued_at,
+          r.started_at,
+          r.finished_at,
+          r.triggered_by,
+          r.error_message,
+          r.pipeline_config,
+          r.metadata
+        FROM pipeline_runs r
+        INNER JOIN projects p ON p.id = r.project_id
+        WHERE r.id = ANY($1::text[])
+        ORDER BY r.queued_at DESC
+      `,
+      [runIds]
+    );
+
+    return result.rows.map(mapRunSummary);
   }
 
   async getRunDetail(runId: string): Promise<{
@@ -1117,6 +1307,150 @@ export class AutoOpsDb {
     return result.rows.map(mapDeploymentRevisionSummary);
   }
 
+  async getDeploymentTargetDetail(
+    targetId: string
+  ): Promise<DeploymentTargetDetail | null> {
+    const target = await this.getDeploymentTargetById(targetId);
+    if (!target) {
+      return null;
+    }
+
+    const revisions = await this.listTargetRevisions(targetId);
+    const linkedRunIds = [...new Set(revisions.flatMap((revision) => (
+      revision.runId ? [revision.runId] : []
+    )))];
+
+    return {
+      target,
+      revisions,
+      linkedRuns: await this.listRunsByIds(linkedRunIds)
+    };
+  }
+
+  async listActivityEvents(input: {
+    limit?: number;
+    kind?: "audit" | "webhook";
+    status?: string;
+  } = {}): Promise<ActivityEvent[]> {
+    const limit = input.limit ?? 50;
+    const [auditRows, webhookRows] = await Promise.all([
+      input.kind === "webhook"
+        ? Promise.resolve<AuditLogRow[]>([])
+        : this.pool.query<AuditLogRow>(
+            `
+              SELECT id, actor, action, entity_type, entity_id, metadata, created_at
+              FROM audit_logs
+              ORDER BY created_at DESC
+              LIMIT $1
+            `,
+            [limit]
+          ).then((result) => result.rows),
+      input.kind === "audit"
+        ? Promise.resolve<WebhookActivityRow[]>([])
+        : this.pool.query<WebhookActivityRow>(
+            `
+              SELECT
+                w.delivery_id,
+                w.event_name,
+                w.status,
+                w.run_id,
+                w.error_message,
+                w.created_at,
+                w.payload -> 'repository' -> 'owner' ->> 'login' AS repo_owner,
+                w.payload -> 'repository' ->> 'name' AS repo_name,
+                p.id AS project_id
+              FROM webhook_deliveries w
+              LEFT JOIN projects p
+                ON p.repo_owner = w.payload -> 'repository' -> 'owner' ->> 'login'
+               AND p.repo_name = w.payload -> 'repository' ->> 'name'
+              ORDER BY w.created_at DESC
+              LIMIT $1
+            `,
+            [limit]
+          ).then((result) => result.rows)
+    ]);
+
+    const events = [
+      ...auditRows.map(mapAuditActivityEvent),
+      ...webhookRows.map(mapWebhookActivityEvent)
+    ]
+      .filter((event) => !input.status || event.status === input.status)
+      .sort((left, right) => (
+        Date.parse(right.occurredAt) - Date.parse(left.occurredAt)
+      ))
+      .slice(0, limit);
+
+    return events;
+  }
+
+  async getDashboardOverview(): Promise<DashboardOverview> {
+    const [
+      projectCountResult,
+      queuedRunCountResult,
+      runningRunCountResult,
+      successRateResult,
+      recentRuns,
+      recentDeployments,
+      recentActivity,
+      activeRuns,
+      latestFailedRun,
+      deploymentTargets
+    ] = await Promise.all([
+      this.pool.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM projects"),
+      this.pool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM pipeline_runs WHERE status = 'queued'"
+      ),
+      this.pool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM pipeline_runs WHERE status = 'running'"
+      ),
+      this.pool.query<{ total: string; succeeded: string }>(
+        `
+          SELECT
+            COUNT(*) FILTER (
+              WHERE status IN ('succeeded', 'failed', 'cancelled')
+            )::text AS total,
+            COUNT(*) FILTER (
+              WHERE status = 'succeeded'
+            )::text AS succeeded
+          FROM pipeline_runs
+          WHERE queued_at >= NOW() - INTERVAL '7 days'
+        `
+      ),
+      this.listRuns({ limit: 8 }),
+      this.listDeploymentRevisions(6),
+      this.listActivityEvents({ limit: 8 }),
+      this.listRuns({ status: "running", limit: 5 }),
+      this.listRuns({ status: "failed", limit: 1 }),
+      this.listDeploymentTargets()
+    ]);
+
+    const allUnhealthyTargets = deploymentTargets.filter(
+      (target) => target.lastStatus !== null && target.lastStatus !== "succeeded"
+    );
+    const unhealthyTargets = allUnhealthyTargets.slice(0, 5);
+
+    const totalCompleted = Number(successRateResult.rows[0]?.total ?? "0");
+    const succeeded = Number(successRateResult.rows[0]?.succeeded ?? "0");
+
+    return {
+      metrics: {
+        projectCount: Number(projectCountResult.rows[0]?.count ?? "0"),
+        queuedRunCount: Number(queuedRunCountResult.rows[0]?.count ?? "0"),
+        runningRunCount: Number(runningRunCountResult.rows[0]?.count ?? "0"),
+        successRate7d: totalCompleted > 0 ? Math.round((succeeded / totalCompleted) * 100) : 0,
+        unhealthyTargetCount: allUnhealthyTargets.length
+      },
+      attention: {
+        latestFailedRun: latestFailedRun[0] ?? null,
+        activeRuns,
+        unhealthyTargets
+      },
+      recentRuns,
+      recentDeployments,
+      recentActivity
+    };
+  }
+
   async createRollbackEvent(input: {
     targetId: string;
     runId?: string | null;
@@ -1289,6 +1623,84 @@ function mapDeploymentRevisionSummary(
     deployedAt: row.deployed_at,
     rollbackOfRevisionId: row.rollback_of_revision_id
   };
+}
+
+function mapInstallationSummary(
+  row: InstallationRow
+): ProjectInstallationSummary {
+  return {
+    installationId: Number(row.installation_id),
+    accountLogin: row.account_login,
+    accountType: row.account_type,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapAuditActivityEvent(row: AuditLogRow): ActivityEvent {
+  const metadata = row.metadata ?? {};
+  const status = typeof metadata.status === "string" ? metadata.status : "completed";
+  const metadataSummary = Object.entries(metadata)
+    .slice(0, 2)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(" | ");
+
+  return {
+    id: `audit:${row.id}`,
+    kind: "audit",
+    title: humanizeDotSeparatedLabel(row.action),
+    description: metadataSummary || `${humanizeDotSeparatedLabel(row.action)} recorded`,
+    status,
+    occurredAt: row.created_at,
+    actor: row.actor,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    projectId: row.entity_type === "project" ? row.entity_id : readString(metadata.projectId),
+    runId: row.entity_type === "run" ? row.entity_id : readString(metadata.runId),
+    targetId: row.entity_type === "deployment_target"
+      ? row.entity_id
+      : readString(metadata.targetId),
+    metadata
+  };
+}
+
+function mapWebhookActivityEvent(row: WebhookActivityRow): ActivityEvent {
+  const repoName = row.repo_owner && row.repo_name
+    ? `${row.repo_owner}/${row.repo_name}`
+    : "unknown repository";
+
+  return {
+    id: `webhook:${row.delivery_id}`,
+    kind: "webhook",
+    title: `GitHub ${row.event_name}`,
+    description: row.error_message
+      ? `${repoName} | ${row.error_message}`
+      : `${repoName} webhook ${row.status}`,
+    status: row.status,
+    occurredAt: row.created_at,
+    actor: null,
+    entityType: "webhook_delivery",
+    entityId: row.delivery_id,
+    projectId: row.project_id,
+    runId: row.run_id,
+    targetId: null,
+    metadata: {
+      deliveryId: row.delivery_id,
+      eventName: row.event_name,
+      repoOwner: row.repo_owner,
+      repoName: row.repo_name
+    }
+  };
+}
+
+function humanizeDotSeparatedLabel(value: string): string {
+  return value
+    .split(".")
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }
 
 export async function withClient<T>(
