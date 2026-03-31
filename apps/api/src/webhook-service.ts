@@ -1,0 +1,164 @@
+import {
+  matchesPushTrigger,
+  normalizeGitRef,
+  parsePipelineConfig
+} from "@autoops/core";
+import type { AutoOpsDb } from "@autoops/db";
+
+import type { GitHubAppService } from "./github-app.js";
+
+interface WebhookHeaders {
+  deliveryId: string | undefined;
+  eventName: string | undefined;
+  signature: string | undefined;
+}
+
+export class GitHubWebhookService {
+  constructor(
+    private readonly db: AutoOpsDb,
+    private readonly github: GitHubAppService
+  ) {}
+
+  async handle(headers: WebhookHeaders, payload: Record<string, any>) {
+    const deliveryId = headers.deliveryId;
+    const eventName = headers.eventName;
+
+    if (!deliveryId || !eventName) {
+      throw new Error("Missing GitHub delivery headers.");
+    }
+
+    if (await this.db.hasWebhookDelivery(deliveryId)) {
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "duplicate"
+      });
+      return {
+        status: "duplicate" as const
+      };
+    }
+
+    await this.db.recordWebhookDelivery({
+      deliveryId,
+      eventName,
+      payload,
+      status: "received"
+    });
+
+    if (eventName === "installation" || eventName === "installation_repositories") {
+      const installationId = Number(payload.installation?.id);
+      const accountLogin = payload.installation?.account?.login ?? payload.sender?.login ?? "unknown";
+      const accountType = payload.installation?.account?.type ?? "User";
+      if (installationId) {
+        await this.db.upsertGitHubInstallation({
+          installationId,
+          accountLogin,
+          accountType
+        });
+      }
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "processed"
+      });
+      return {
+        status: "processed" as const
+      };
+    }
+
+    if (eventName !== "push") {
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "ignored"
+      });
+      return {
+        status: "ignored" as const
+      };
+    }
+
+    const repoOwner = payload.repository?.owner?.login ?? payload.repository?.owner?.name;
+    const repoName = payload.repository?.name;
+    const installationId = Number(payload.installation?.id);
+    const ref = payload.ref as string | undefined;
+    const commitSha = payload.after as string | undefined;
+    const triggeredBy = payload.sender?.login ?? "github";
+
+    if (!repoOwner || !repoName || !installationId || !ref || !commitSha) {
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "failed",
+        errorMessage: "Push payload is missing required repository metadata."
+      });
+      return {
+        status: "failed" as const
+      };
+    }
+
+    const project = await this.db.getProjectByRepo(repoOwner, repoName);
+    if (!project) {
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "ignored",
+        errorMessage: "Repository is not registered in AutoOps."
+      });
+      return {
+        status: "ignored" as const
+      };
+    }
+
+    const configContents = await this.github.fetchRepositoryFile({
+      installationId,
+      owner: repoOwner,
+      repo: repoName,
+      path: project.configPath,
+      ref: commitSha
+    });
+    const pipelineConfig = parsePipelineConfig(configContents);
+    if (!matchesPushTrigger(pipelineConfig, ref)) {
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "ignored",
+        errorMessage: `Branch ${normalizeGitRef(ref)} does not match the configured push trigger.`
+      });
+      return {
+        status: "ignored" as const
+      };
+    }
+
+    const run = await this.db.createRun({
+      projectId: project.id,
+      deliveryId,
+      source: "push",
+      branch: normalizeGitRef(ref),
+      commitSha,
+      triggeredBy,
+      pipelineConfig,
+      metadata: {
+        deliveryId,
+        pipelineConfig
+      }
+    });
+    await this.db.supersedeQueuedRuns(project.id, normalizeGitRef(ref), run.id);
+    await this.db.recordWebhookDelivery({
+      deliveryId,
+      eventName,
+      payload,
+      status: "processed",
+      runId: run.id
+    });
+    return {
+      status: "processed" as const,
+      runId: run.id
+    };
+  }
+}
