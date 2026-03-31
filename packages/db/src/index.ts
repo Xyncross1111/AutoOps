@@ -9,6 +9,7 @@ import type {
   DeploymentTargetDetail,
   DeploymentTargetType,
   DeploymentTargetSummary,
+  GitHubConnectedAccount,
   GitHubRepositoryFilters,
   GitHubRepositorySummary,
   ManagedAppPackageManager,
@@ -96,6 +97,19 @@ CREATE TABLE IF NOT EXISTS github_repositories (
 
 CREATE INDEX IF NOT EXISTS idx_github_repositories_owner_name
   ON github_repositories (owner, name);
+
+CREATE TABLE IF NOT EXISTS github_oauth_connections (
+  actor_email TEXT PRIMARY KEY,
+  github_user_id BIGINT NOT NULL,
+  github_login TEXT NOT NULL,
+  github_name TEXT,
+  avatar_url TEXT,
+  profile_url TEXT NOT NULL,
+  scope TEXT,
+  encrypted_access_token TEXT NOT NULL,
+  connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -331,6 +345,19 @@ interface GitHubRepositoryRow {
   synced_at: string;
 }
 
+interface GitHubOAuthConnectionRow {
+  actor_email: string;
+  github_user_id: string | number;
+  github_login: string;
+  github_name: string | null;
+  avatar_url: string | null;
+  profile_url: string;
+  scope: string | null;
+  encrypted_access_token: string;
+  connected_at: string;
+  updated_at: string;
+}
+
 interface AuditLogRow {
   id: number;
   actor: string;
@@ -351,6 +378,11 @@ interface WebhookActivityRow {
   repo_owner: string | null;
   repo_name: string | null;
   project_id: string | null;
+}
+
+export interface GitHubOAuthConnectionRecord extends GitHubConnectedAccount {
+  actorEmail: string;
+  encryptedAccessToken: string;
 }
 
 export interface CreateProjectInput {
@@ -706,6 +738,7 @@ export class AutoOpsDb {
           last_sync_error,
           updated_at
         FROM github_installations
+        WHERE account_type <> 'OAuth'
         ORDER BY updated_at DESC
       `
     );
@@ -732,6 +765,91 @@ export class AutoOpsDb {
       [installationId]
     );
     return result.rows[0] ? mapInstallationSummary(result.rows[0]) : null;
+  }
+
+  async upsertGitHubOAuthConnection(input: {
+    actorEmail: string;
+    githubUserId: number;
+    login: string;
+    name: string | null;
+    avatarUrl: string | null;
+    profileUrl: string;
+    scope: string | null;
+    encryptedAccessToken: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `
+        INSERT INTO github_oauth_connections (
+          actor_email,
+          github_user_id,
+          github_login,
+          github_name,
+          avatar_url,
+          profile_url,
+          scope,
+          encrypted_access_token,
+          connected_at,
+          updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+        )
+        ON CONFLICT (actor_email)
+        DO UPDATE SET
+          github_user_id = EXCLUDED.github_user_id,
+          github_login = EXCLUDED.github_login,
+          github_name = EXCLUDED.github_name,
+          avatar_url = EXCLUDED.avatar_url,
+          profile_url = EXCLUDED.profile_url,
+          scope = EXCLUDED.scope,
+          encrypted_access_token = EXCLUDED.encrypted_access_token,
+          updated_at = NOW()
+      `,
+      [
+        input.actorEmail,
+        input.githubUserId,
+        input.login,
+        input.name,
+        input.avatarUrl,
+        input.profileUrl,
+        input.scope,
+        input.encryptedAccessToken
+      ]
+    );
+  }
+
+  async getGitHubOAuthConnection(
+    actorEmail: string
+  ): Promise<GitHubOAuthConnectionRecord | null> {
+    const result = await this.pool.query<GitHubOAuthConnectionRow>(
+      `
+        SELECT
+          actor_email,
+          github_user_id,
+          github_login,
+          github_name,
+          avatar_url,
+          profile_url,
+          scope,
+          encrypted_access_token,
+          connected_at,
+          updated_at
+        FROM github_oauth_connections
+        WHERE actor_email = $1
+      `,
+      [actorEmail]
+    );
+
+    return result.rows[0] ? mapGitHubOAuthConnectionRecord(result.rows[0]) : null;
+  }
+
+  async deleteGitHubOAuthConnection(actorEmail: string): Promise<void> {
+    await this.pool.query(
+      `
+        DELETE FROM github_oauth_connections
+        WHERE actor_email = $1
+      `,
+      [actorEmail]
+    );
   }
 
   async setGitHubInstallationSyncState(input: {
@@ -2122,6 +2240,23 @@ function mapGitHubRepositorySummary(
     linkedProjectId: row.linked_project_id,
     analyzedAt: row.analyzed_at,
     syncedAt: row.synced_at
+  };
+}
+
+function mapGitHubOAuthConnectionRecord(
+  row: GitHubOAuthConnectionRow
+): GitHubOAuthConnectionRecord {
+  return {
+    actorEmail: row.actor_email,
+    githubUserId: Number(row.github_user_id),
+    login: row.github_login,
+    name: row.github_name,
+    avatarUrl: row.avatar_url,
+    profileUrl: row.profile_url,
+    scope: row.scope,
+    encryptedAccessToken: row.encrypted_access_token,
+    connectedAt: row.connected_at,
+    updatedAt: row.updated_at
   };
 }
 

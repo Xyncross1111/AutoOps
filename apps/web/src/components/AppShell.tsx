@@ -3,9 +3,11 @@ import {
   FolderGit2,
   LayoutDashboard,
   LogOut,
+  Moon,
   PlusCircle,
   RefreshCw,
   Rocket,
+  Sun,
   Workflow
 } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
@@ -22,6 +24,10 @@ const pageMeta: Record<string, { title: string; subtitle: string }> = {
   "/deployments": {
     title: "Deployments",
     subtitle: "Monitor target health, revision history, and rollback readiness."
+  },
+  "/github/connect/callback": {
+    title: "Connecting GitHub",
+    subtitle: "Finalizing the GitHub installation handshake and syncing visible repositories."
   },
   "/repositories": {
     title: "Repositories",
@@ -52,8 +58,10 @@ const navItems = [
 
 export function AppShell(props: {
   userEmail: string;
+  theme: "light" | "dark";
   onRefresh: () => void;
   onLogout: () => void;
+  onToggleTheme: () => void;
 }) {
   const location = useLocation();
   const meta = pageMeta[location.pathname] ?? {
@@ -111,6 +119,14 @@ export function AppShell(props: {
           </div>
 
           <div className="header-actions">
+            <button
+              className="theme-toggle ghost"
+              onClick={props.onToggleTheme}
+              aria-label="Toggle theme"
+            >
+              {props.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+              <span>{props.theme === "dark" ? "Light mode" : "Dark mode"}</span>
+            </button>
             <button className="secondary" onClick={props.onRefresh}>
               <RefreshCw size={16} />
               <span>Refresh</span>

@@ -80,6 +80,17 @@ const MANAGED_RUN = {
   pipelineConfig: null
 };
 
+const OAUTH_MANAGED_RUN = {
+  ...MANAGED_RUN,
+  installationId: 9000000000099,
+  metadata: {
+    repoAccess: {
+      type: "oauth" as const,
+      actorEmail: "admin@autoops.local"
+    }
+  }
+};
+
 function createDb(overrides: Record<string, unknown> = {}) {
   return {
     claimNextQueuedRun: vi.fn().mockResolvedValue(CLAIMED_RUN),
@@ -139,6 +150,7 @@ function createDb(overrides: Record<string, unknown> = {}) {
     completeRollbackEvent: vi.fn().mockResolvedValue(undefined),
     getDeploymentTargetById: vi.fn().mockResolvedValue(null),
     getRevision: vi.fn().mockResolvedValue(null),
+    getGitHubOAuthConnection: vi.fn().mockResolvedValue(null),
     ...overrides
   };
 }
@@ -269,6 +281,75 @@ describe("PipelineWorker", () => {
       expect(infra.inspectImageId).toHaveBeenCalledTimes(1);
       expect(infra.deployManagedTarget).toHaveBeenCalledTimes(1);
       expect(db.createDeploymentRevision).toHaveBeenCalledTimes(1);
+      expect(db.setRunStatus).toHaveBeenCalledWith("run-1", "succeeded");
+    } finally {
+      rmSync(runtimeDir, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the connected GitHub OAuth token for managed deployments without an app installation", async () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "autoops-managed-oauth-test-"));
+    const repoDir = mkdtempSync(join(tmpdir(), "autoops-managed-oauth-repo-"));
+
+    try {
+      const db = createDb({
+        claimNextQueuedRun: vi.fn().mockResolvedValue(OAUTH_MANAGED_RUN),
+        getGitHubOAuthConnection: vi.fn().mockResolvedValue({
+          actorEmail: "admin@autoops.local",
+          githubUserId: 99,
+          login: "octocat",
+          name: "The Octocat",
+          avatarUrl: null,
+          profileUrl: "https://github.com/octocat",
+          scope: "read:user,repo",
+          encryptedAccessToken: encryptSecret("oauth-access-token", "master-key-123"),
+          connectedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }),
+        listDeploymentTargets: vi.fn().mockResolvedValue([
+          {
+            id: "target-managed",
+            projectId: "project-1",
+            projectName: "Demo",
+            name: "managed-vps",
+            targetType: "managed_vps",
+            hostRef: "managed",
+            composeFile: `${runtimeDir}/docker-compose.yml`,
+            service: "app",
+            healthcheckUrl: "http://acme-demo-100:3000/",
+            managedPort: 6100,
+            managedRuntimeDir: runtimeDir,
+            managedDomain: null,
+            lastStatus: null,
+            lastDeployedImage: null,
+            lastDeployedAt: null,
+            lastError: null
+          }
+        ])
+      });
+      const infra = createInfra({
+        cloneRepository: vi.fn().mockResolvedValue(repoDir)
+      });
+      const github = {
+        createInstallationToken: vi.fn().mockResolvedValue("installation-token")
+      };
+      const worker = new PipelineWorker(
+        db as any,
+        github as any,
+        infra as any,
+        WORKER_CONFIG
+      );
+
+      const processed = await worker.processOnce();
+
+      expect(processed).toBe(true);
+      expect(infra.cloneRepository).toHaveBeenCalledWith(
+        expect.objectContaining({
+          token: "oauth-access-token"
+        })
+      );
+      expect(github.createInstallationToken).not.toHaveBeenCalled();
       expect(db.setRunStatus).toHaveBeenCalledWith("run-1", "succeeded");
     } finally {
       rmSync(runtimeDir, { recursive: true, force: true });

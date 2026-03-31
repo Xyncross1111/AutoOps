@@ -180,10 +180,17 @@ export interface ManualRollbackMetadata {
   initiatedBy: string;
 }
 
+export interface RunRepositoryAccessMetadata {
+  type: "installation" | "oauth";
+  installationId?: number;
+  actorEmail?: string;
+}
+
 export interface QueuedRunMetadata {
   pipelineConfig?: PipelineConfig;
   deliveryId?: string;
   manualRollback?: ManualRollbackMetadata;
+  repoAccess?: RunRepositoryAccessMetadata;
 }
 
 export interface ProjectInstallationSummary {
@@ -223,6 +230,34 @@ export interface GitHubRepositoryFilters {
   search?: string;
   deployable?: boolean;
   imported?: boolean;
+}
+
+export interface GitHubConnectedAccount {
+  githubUserId: number;
+  login: string;
+  name: string | null;
+  avatarUrl: string | null;
+  profileUrl: string;
+  scope: string | null;
+  connectedAt: string;
+  updatedAt: string;
+}
+
+export interface GitHubUserRepositorySummary {
+  repoId: number;
+  owner: string;
+  name: string;
+  fullName: string;
+  description: string | null;
+  defaultBranch: string;
+  isPrivate: boolean;
+  isArchived: boolean;
+  visibility: string;
+  htmlUrl: string;
+  pushedAt: string | null;
+  installationId: number | null;
+  linkedProjectId: string | null;
+  autoOpsDeployabilityStatus: GitHubRepoDeployabilityStatus | null;
 }
 
 export interface RunListFilters {

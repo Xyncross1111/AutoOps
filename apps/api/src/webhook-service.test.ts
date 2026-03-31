@@ -159,7 +159,13 @@ describe("GitHubWebhookService", () => {
       source: "push",
       branch: "main",
       commitSha: "def456",
-      triggeredBy: "anas"
+      triggeredBy: "anas",
+      metadata: {
+        repoAccess: {
+          type: "installation",
+          installationId: 12
+        }
+      }
     });
   });
 });

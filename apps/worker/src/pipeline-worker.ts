@@ -229,7 +229,7 @@ export class PipelineWorker {
       const localTag = `autoops-managed-${run.appSlug}:${run.id}`;
 
       await this.runStage(run.id, "prepare", 1, async () => {
-        const token = await this.github.createInstallationToken(run.installationId);
+        const token = await this.resolveManagedRepositoryToken(run);
         workdir = await this.infra.cloneRepository({
           owner: run.repoOwner,
           repo: run.repoName,
@@ -321,6 +321,30 @@ export class PipelineWorker {
         await this.infra.cleanupPath(workdir);
       }
     }
+  }
+
+  private async resolveManagedRepositoryToken(run: ClaimedRun): Promise<string> {
+    const repoAccess = run.metadata.repoAccess;
+
+    if (repoAccess?.type === "oauth") {
+      if (!repoAccess.actorEmail) {
+        throw new Error("Managed deployment is missing the GitHub OAuth actor.");
+      }
+
+      const connection = await this.db.getGitHubOAuthConnection(repoAccess.actorEmail);
+      if (!connection) {
+        throw new Error("The connected GitHub account is no longer available for this deployment.");
+      }
+
+      return decryptSecret(connection.encryptedAccessToken, this.config.SECRET_MASTER_KEY);
+    }
+
+    const installationId = repoAccess?.installationId ?? run.installationId;
+    if (!installationId) {
+      throw new Error("Managed deployment is missing repository access credentials.");
+    }
+
+    return this.github.createInstallationToken(installationId);
   }
 
   private async handleManualRollback(run: ClaimedRun): Promise<void> {

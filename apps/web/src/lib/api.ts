@@ -4,8 +4,10 @@ import type {
   DeploymentRevisionSummary,
   DeploymentTargetDetail,
   DeploymentTargetSummary,
+  GitHubConnectedAccount,
   GitHubRepositoryFilters,
   GitHubRepositorySummary,
+  GitHubUserRepositorySummary,
   PipelineRunSummary,
   ProjectDetail,
   ProjectInstallationSummary,
@@ -200,7 +202,16 @@ export function listGitHubRepositories(
 
 export function importGitHubRepository(
   token: string,
-  input: { installationId: number; repoId: number }
+  input: {
+    installationId?: number;
+    repoId: number;
+    owner: string;
+    name: string;
+    defaultBranch: string;
+    htmlUrl?: string;
+    isPrivate?: boolean;
+    isArchived?: boolean;
+  }
 ) {
   return fetchJson<{ project: ProjectSummary }>("/api/github/repositories/import", token, {
     method: "POST",
@@ -208,8 +219,45 @@ export function importGitHubRepository(
   });
 }
 
-export function getGitHubInstallUrl(token: string) {
-  return fetchJson<{ url: string }>("/api/github/install-url", token);
+export function getGitHubInstallUrl(token: string, state?: string) {
+  return fetchJson<{ url: string }>(
+    "/api/github/install-url",
+    token,
+    {},
+    state ? { state } : undefined
+  );
+}
+
+export function getGitHubOAuthUrl(token: string) {
+  return fetchJson<{ url: string }>("/api/github/oauth-url", token);
+}
+
+export function completeGitHubOAuth(
+  token: string,
+  input: { code: string; state: string }
+) {
+  return fetchJson<{ account: GitHubConnectedAccount | null }>(
+    "/api/github/oauth/complete",
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    }
+  );
+}
+
+export function getGitHubAccount(token: string) {
+  return fetchJson<{ account: GitHubConnectedAccount | null }>(
+    "/api/github/account",
+    token
+  );
+}
+
+export function listGitHubUserRepositories(token: string) {
+  return fetchJson<{ repositories: GitHubUserRepositorySummary[] }>(
+    "/api/github/account/repositories",
+    token
+  );
 }
 
 export function deployManagedProject(token: string, projectId: string) {

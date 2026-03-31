@@ -166,7 +166,9 @@ export function ProjectDetailPage() {
               label="Installation"
               value={
                 detail.installation
-                  ? `${detail.installation.accountLogin} #${detail.installation.installationId}`
+                  ? detail.installation.accountType === "OAuth"
+                    ? `Connected as ${detail.installation.accountLogin} via GitHub OAuth`
+                    : `${detail.installation.accountLogin} #${detail.installation.installationId}`
                   : "Not linked"
               }
             />

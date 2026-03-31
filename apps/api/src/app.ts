@@ -1,8 +1,9 @@
 import cors from "cors";
 import express from "express";
+import jwt from "jsonwebtoken";
 import { z } from "zod";
 
-import { encryptSecret, verifyGitHubSignature } from "@autoops/core";
+import { decryptSecret, encryptSecret, verifyGitHubSignature } from "@autoops/core";
 import type { AutoOpsDb } from "@autoops/db";
 
 import { createAuthHelpers, type AuthenticatedRequest } from "./auth.js";
@@ -64,8 +65,23 @@ const repositoryFiltersSchema = z.object({
 });
 
 const importRepositorySchema = z.object({
-  installationId: z.number().int().positive(),
-  repoId: z.number().int().positive()
+  installationId: z.number().int().positive().optional(),
+  repoId: z.number().int().positive(),
+  owner: z.string().min(1),
+  name: z.string().min(1),
+  defaultBranch: z.string().min(1),
+  htmlUrl: z.string().url().optional(),
+  isPrivate: z.boolean().optional(),
+  isArchived: z.boolean().optional()
+});
+
+const oauthCompleteSchema = z.object({
+  code: z.string().min(1),
+  state: z.string().min(1)
+});
+
+const installUrlQuerySchema = z.object({
+  state: z.string().trim().min(1).max(512).optional()
 });
 
 export function createApp(args: {
@@ -132,17 +148,153 @@ export function createApp(args: {
     res.json({ user: req.user });
   });
 
+  app.get("/api/github/oauth-url", (req: RawBodyRequest, res) => {
+    if (!req.user?.email) {
+      res.status(401).json({ error: "Missing authenticated user." });
+      return;
+    }
+    if (!github.isOAuthConfigured()) {
+      res.status(503).json({ error: "GitHub OAuth is not configured." });
+      return;
+    }
+
+    res.json({
+      url: github.getOAuthAuthorizeUrl(
+        createGitHubOAuthState(req.user.email, config.JWT_SECRET)
+      )
+    });
+  });
+
+  app.post("/api/github/oauth/complete", asyncRoute(async (req, res) => {
+    const parsed = oauthCompleteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    if (!req.user?.email) {
+      res.status(401).json({ error: "Missing authenticated user." });
+      return;
+    }
+    if (!github.isOAuthConfigured()) {
+      res.status(503).json({ error: "GitHub OAuth is not configured." });
+      return;
+    }
+
+    const state = verifyGitHubOAuthState(parsed.data.state, config.JWT_SECRET);
+    if (state.email !== req.user.email) {
+      res.status(403).json({ error: "GitHub OAuth state does not match the active AutoOps session." });
+      return;
+    }
+
+    const account = await github.exchangeOAuthCode({
+      code: parsed.data.code,
+      state: parsed.data.state
+    });
+
+    await db.upsertGitHubOAuthConnection({
+      actorEmail: req.user.email,
+      githubUserId: account.githubUserId,
+      login: account.login,
+      name: account.name,
+      avatarUrl: account.avatarUrl,
+      profileUrl: account.profileUrl,
+      scope: account.scope,
+      encryptedAccessToken: encryptSecret(account.accessToken, config.SECRET_MASTER_KEY)
+    });
+    await db.writeAuditLog(
+      req.user.email,
+      "github.oauth.connected",
+      "github_account",
+      String(account.githubUserId),
+      {
+        login: account.login
+      }
+    );
+
+    res.json({
+      account: await readGitHubOAuthAccount(db, req.user.email)
+    });
+  }));
+
+  app.get("/api/github/account", asyncRoute(async (req, res) => {
+    if (!req.user?.email) {
+      res.status(401).json({ error: "Missing authenticated user." });
+      return;
+    }
+
+    res.json({
+      account: await readGitHubOAuthAccount(db, req.user.email)
+    });
+  }));
+
+  app.get("/api/github/account/repositories", asyncRoute(async (req, res) => {
+    if (!req.user?.email) {
+      res.status(401).json({ error: "Missing authenticated user." });
+      return;
+    }
+
+    const connection = await db.getGitHubOAuthConnection(req.user.email);
+    if (!connection) {
+      res.json({ repositories: [] });
+      return;
+    }
+
+    const accessToken = decryptSecret(
+      connection.encryptedAccessToken,
+      config.SECRET_MASTER_KEY
+    );
+    const [userRepositories, autoOpsRepositories, projects] = await Promise.all([
+      github.listUserRepositories(accessToken),
+      db.listGitHubRepositories(),
+      db.listProjects()
+    ]);
+    const autoOpsRepositoriesByName = new Map(
+      autoOpsRepositories.map((repository) => [repository.fullName.toLowerCase(), repository])
+    );
+    const projectsByName = new Map(
+      projects.map((project) => [
+        `${project.repoOwner}/${project.repoName}`.toLowerCase(),
+        project
+      ])
+    );
+
+    res.json({
+      repositories: userRepositories.map((repository) => {
+        const linkedRepository = autoOpsRepositoriesByName.get(repository.fullName.toLowerCase());
+        const linkedProject =
+          linkedRepository?.linkedProjectId
+            ? null
+            : projectsByName.get(repository.fullName.toLowerCase()) ?? null;
+        return {
+          ...repository,
+          installationId: linkedRepository?.installationId ?? null,
+          linkedProjectId: linkedRepository?.linkedProjectId ?? linkedProject?.id ?? null,
+          autoOpsDeployabilityStatus:
+            linkedRepository?.deployabilityStatus ??
+            (linkedProject ? "imported" : null)
+        };
+      })
+    });
+  }));
+
   app.get("/api/dashboard/overview", asyncRoute(async (_req, res) => {
     res.json({
       overview: await db.getDashboardOverview()
     });
   }));
 
-  app.get("/api/github/install-url", (_req, res) => {
+  app.get("/api/github/install-url", asyncRoute(async (req, res) => {
+    const parsed = installUrlQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
     res.json({
-      url: github.getInstallUrl()
+      url: await github.getInstallUrl({
+        state: parsed.data.state
+      })
     });
-  });
+  }));
 
   app.get("/api/github/installations", asyncRoute(async (_req, res) => {
     res.json({
@@ -162,8 +314,22 @@ export function createApp(args: {
 
     const installation = await db.getGitHubInstallation(installationId);
     if (!installation) {
-      res.status(404).json({ error: "Installation not found." });
-      return;
+      let remoteInstallation;
+      try {
+        remoteInstallation = await github.getInstallation(installationId);
+      } catch (error) {
+        if (
+          error &&
+          typeof error === "object" &&
+          "status" in error &&
+          Number((error as { status?: unknown }).status) === 404
+        ) {
+          res.status(404).json({ error: "Installation not found." });
+          return;
+        }
+        throw error;
+      }
+      await db.upsertGitHubInstallation(remoteInstallation);
     }
 
     const repositories = await syncInstallationRepositories({ db, github, installationId });
@@ -203,31 +369,95 @@ export function createApp(args: {
       return;
     }
 
-    const repository = await db.getGitHubRepository(
-      parsed.data.installationId,
-      parsed.data.repoId
-    );
-    if (!repository) {
-      res.status(404).json({ error: "Repository not found in the synced catalog." });
-      return;
-    }
-    if (repository.linkedProjectId) {
-      res.status(409).json({ error: "This repository has already been imported." });
-      return;
-    }
-    if (repository.deployabilityStatus !== "deployable" || !repository.packageManager) {
-      res.status(400).json({ error: "This repository is not eligible for managed import." });
-      return;
-    }
-
-    const existingProject = await db.getProjectByRepo(repository.owner, repository.name);
+    const existingProject = await db.getProjectByRepo(parsed.data.owner, parsed.data.name);
     if (existingProject) {
       res.status(409).json({ error: "A project already exists for this repository." });
       return;
     }
 
+    let repository = null as Awaited<ReturnType<typeof db.getGitHubRepository>> | null;
+    let managedConfig = null as ReturnType<typeof buildManagedProjectConfig> | null;
+    let projectInstallationId: number;
+    let accessMode: "installation" | "oauth";
+
+    if (parsed.data.installationId) {
+      repository = await db.getGitHubRepository(
+        parsed.data.installationId,
+        parsed.data.repoId
+      );
+      if (!repository) {
+        res.status(404).json({ error: "Repository not found in the synced catalog." });
+        return;
+      }
+      if (repository.linkedProjectId) {
+        res.status(409).json({ error: "This repository has already been imported." });
+        return;
+      }
+      if (repository.deployabilityStatus !== "deployable" || !repository.packageManager) {
+        res.status(400).json({ error: "This repository is not eligible for managed import." });
+        return;
+      }
+
+      managedConfig = buildManagedProjectConfig(repository.packageManager);
+      projectInstallationId = repository.installationId;
+      accessMode = "installation";
+    } else {
+      if (!req.user?.email) {
+        res.status(401).json({ error: "Missing authenticated user." });
+        return;
+      }
+
+      const oauthConnection = await db.getGitHubOAuthConnection(req.user.email);
+      if (!oauthConnection) {
+        res.status(400).json({ error: "Connect GitHub before importing repositories." });
+        return;
+      }
+
+      const accessToken = decryptSecret(
+        oauthConnection.encryptedAccessToken,
+        config.SECRET_MASTER_KEY
+      );
+      let analysis: Awaited<ReturnType<typeof analyzeOAuthRepositoryAccess>>;
+      try {
+        analysis = await analyzeOAuthRepositoryAccess({
+          github,
+          accessToken,
+          owner: parsed.data.owner,
+          repo: parsed.data.name,
+          ref: parsed.data.defaultBranch,
+          isArchived: parsed.data.isArchived ?? false
+        });
+      } catch {
+        res.status(400).json({
+          error: "AutoOps could not read this repository through the connected GitHub account."
+        });
+        return;
+      }
+
+      if (analysis.deployabilityStatus !== "deployable" || !analysis.managedConfig) {
+        res.status(400).json({
+          error:
+            analysis.deployabilityReason ??
+            "This repository is not eligible for managed import."
+        });
+        return;
+      }
+
+      managedConfig = analysis.managedConfig;
+      projectInstallationId = buildOAuthInstallationId(oauthConnection.githubUserId);
+      accessMode = "oauth";
+      await db.upsertGitHubInstallation({
+        installationId: projectInstallationId,
+        accountLogin: oauthConnection.login,
+        accountType: "OAuth"
+      });
+    }
+
     const managedPort = await db.reserveNextManagedPort();
-    const appSlug = createManagedAppSlug(repository.fullName, repository.repoId);
+    const appSlug = createManagedAppSlug(
+      `${parsed.data.owner}/${parsed.data.name}`,
+      parsed.data.repoId
+    );
     const primaryUrl =
       buildManagedPrimaryUrl({
         baseDomain: config.MANAGED_BASE_DOMAIN,
@@ -240,17 +470,17 @@ export function createApp(args: {
       : null;
     const runtimeDir = `${trimTrailingSlash(config.MANAGED_APPS_DIR)}/apps/${appSlug}`;
     const project = await db.createProject({
-      name: repository.name,
-      repoOwner: repository.owner,
-      repoName: repository.name,
-      installationId: repository.installationId,
+      name: parsed.data.name,
+      repoOwner: parsed.data.owner,
+      repoName: parsed.data.name,
+      installationId: projectInstallationId,
       mode: "managed_nextjs",
-      githubRepoId: repository.repoId,
-      defaultBranch: repository.defaultBranch,
+      githubRepoId: parsed.data.repoId,
+      defaultBranch: parsed.data.defaultBranch,
       configPath: ".autoops/pipeline.yml",
       appSlug,
       primaryUrl,
-      managedConfig: buildManagedProjectConfig(repository.packageManager)
+      managedConfig
     });
 
     await db.syncDeploymentTargets(project.id, [
@@ -266,16 +496,19 @@ export function createApp(args: {
         managedDomain
       }
     ]);
-    await db.linkGitHubRepositoryToProject(repository.installationId, repository.repoId, project.id);
+    if (repository) {
+      await db.linkGitHubRepositoryToProject(repository.installationId, repository.repoId, project.id);
+    }
     await db.writeAuditLog(
       req.user?.email ?? "unknown",
       "project.imported",
       "project",
       project.id,
       {
-        installationId: repository.installationId,
-        repoId: repository.repoId,
-        mode: "managed_nextjs"
+        installationId: repository?.installationId ?? null,
+        repoId: parsed.data.repoId,
+        mode: "managed_nextjs",
+        accessMode
       }
     );
 
@@ -387,19 +620,57 @@ export function createApp(args: {
       return;
     }
 
-    const commitSha = await github.getBranchHeadSha({
-      installationId: project.installationId,
-      owner: project.repoOwner,
-      repo: project.repoName,
-      branch: project.defaultBranch
-    });
+    let commitSha = "";
+    let repoAccess: { type: "installation"; installationId: number } | { type: "oauth"; actorEmail: string };
+
+    if (project.installationId && !isOAuthInstallation(project.installationId)) {
+      commitSha = await github.getBranchHeadSha({
+        installationId: project.installationId,
+        owner: project.repoOwner,
+        repo: project.repoName,
+        branch: project.defaultBranch
+      });
+      repoAccess = {
+        type: "installation",
+        installationId: project.installationId
+      };
+    } else {
+      if (!req.user?.email) {
+        res.status(401).json({ error: "Missing authenticated user." });
+        return;
+      }
+
+      const connection = await db.getGitHubOAuthConnection(req.user.email);
+      if (!connection) {
+        res.status(400).json({ error: "Connect GitHub before deploying this project." });
+        return;
+      }
+
+      const accessToken = decryptSecret(
+        connection.encryptedAccessToken,
+        config.SECRET_MASTER_KEY
+      );
+      commitSha = await github.getBranchHeadShaWithOAuth({
+        owner: project.repoOwner,
+        repo: project.repoName,
+        branch: project.defaultBranch,
+        accessToken
+      });
+      repoAccess = {
+        type: "oauth",
+        actorEmail: req.user.email
+      };
+    }
 
     const run = await db.createRun({
       projectId,
       source: "manual_deploy",
       branch: project.defaultBranch,
       commitSha,
-      triggeredBy: req.user?.email ?? "unknown"
+      triggeredBy: req.user?.email ?? "unknown",
+      metadata: {
+        repoAccess
+      }
     });
     await db.supersedeQueuedRuns(projectId, project.defaultBranch, run.id);
     await db.writeAuditLog(
@@ -618,69 +889,15 @@ async function syncInstallationRepositories(args: {
     const analyzedRepositories = [];
 
     for (const repository of repositories) {
-      const ref = repository.defaultBranch;
-      const [packageJson, pnpmWorkspace, turboJson, nxJson, packageLock, pnpmLock, yarnLock] =
-        await Promise.all([
-          github.fetchRepositoryFileOptional({
-            installationId,
-            owner: repository.owner,
-            repo: repository.name,
-            path: "package.json",
-            ref
-          }),
-          github.fetchRepositoryFileOptional({
-            installationId,
-            owner: repository.owner,
-            repo: repository.name,
-            path: "pnpm-workspace.yaml",
-            ref
-          }),
-          github.fetchRepositoryFileOptional({
-            installationId,
-            owner: repository.owner,
-            repo: repository.name,
-            path: "turbo.json",
-            ref
-          }),
-          github.fetchRepositoryFileOptional({
-            installationId,
-            owner: repository.owner,
-            repo: repository.name,
-            path: "nx.json",
-            ref
-          }),
-          github.fetchRepositoryFileOptional({
-            installationId,
-            owner: repository.owner,
-            repo: repository.name,
-            path: "package-lock.json",
-            ref
-          }),
-          github.fetchRepositoryFileOptional({
-            installationId,
-            owner: repository.owner,
-            repo: repository.name,
-            path: "pnpm-lock.yaml",
-            ref
-          }),
-          github.fetchRepositoryFileOptional({
-            installationId,
-            owner: repository.owner,
-            repo: repository.name,
-            path: "yarn.lock",
-            ref
-          })
-        ]);
-
-      const analysis = analyzeRepository({
+      const analysis = await analyzeRepositoryByRef({
         repository,
-        packageJson,
-        hasPnpmWorkspace: pnpmWorkspace !== null,
-        hasTurboJson: turboJson !== null,
-        hasNxJson: nxJson !== null,
-        hasPackageLock: packageLock !== null,
-        hasPnpmLock: pnpmLock !== null,
-        hasYarnLock: yarnLock !== null
+        fetchOptional: (path) => github.fetchRepositoryFileOptional({
+          installationId,
+          owner: repository.owner,
+          repo: repository.name,
+          path,
+          ref: repository.defaultBranch
+        })
       });
 
       analyzedRepositories.push({
@@ -723,6 +940,68 @@ async function syncInstallationRepositories(args: {
   }
 }
 
+const OAUTH_INSTALLATION_ID_OFFSET = 9_000_000_000_000;
+
+async function analyzeRepositoryByRef(args: {
+  repository: {
+    isArchived: boolean;
+  };
+  fetchOptional: (path: string) => Promise<string | null>;
+}) {
+  const [packageJson, pnpmWorkspace, turboJson, nxJson, packageLock, pnpmLock, yarnLock] =
+    await Promise.all([
+      args.fetchOptional("package.json"),
+      args.fetchOptional("pnpm-workspace.yaml"),
+      args.fetchOptional("turbo.json"),
+      args.fetchOptional("nx.json"),
+      args.fetchOptional("package-lock.json"),
+      args.fetchOptional("pnpm-lock.yaml"),
+      args.fetchOptional("yarn.lock")
+    ]);
+
+  return analyzeRepository({
+    repository: args.repository,
+    packageJson,
+    hasPnpmWorkspace: pnpmWorkspace !== null,
+    hasTurboJson: turboJson !== null,
+    hasNxJson: nxJson !== null,
+    hasPackageLock: packageLock !== null,
+    hasPnpmLock: pnpmLock !== null,
+    hasYarnLock: yarnLock !== null
+  });
+}
+
+async function analyzeOAuthRepositoryAccess(args: {
+  github: GitHubAppService;
+  accessToken: string;
+  owner: string;
+  repo: string;
+  ref: string;
+  isArchived: boolean;
+}) {
+  return analyzeRepositoryByRef({
+    repository: {
+      isArchived: args.isArchived
+    },
+    fetchOptional: (path) =>
+      args.github.fetchRepositoryFileOptionalWithOAuth({
+        owner: args.owner,
+        repo: args.repo,
+        path,
+        ref: args.ref,
+        accessToken: args.accessToken
+      })
+  });
+}
+
+function buildOAuthInstallationId(githubUserId: number): number {
+  return OAUTH_INSTALLATION_ID_OFFSET + githubUserId;
+}
+
+function isOAuthInstallation(installationId: number): boolean {
+  return installationId >= OAUTH_INSTALLATION_ID_OFFSET;
+}
+
 function createManagedAppSlug(fullName: string, repoId: number): string {
   const base = fullName
     .toLowerCase()
@@ -758,4 +1037,55 @@ function buildManagedProjectConfig(
   packageManager: "npm" | "pnpm" | "yarn"
 ) {
   return buildManagedNextjsConfig(packageManager, false);
+}
+
+function createGitHubOAuthState(email: string, secret: string): string {
+  return jwt.sign(
+    {
+      type: "github-oauth",
+      email
+    },
+    secret,
+    {
+      expiresIn: "10m"
+    }
+  );
+}
+
+function verifyGitHubOAuthState(
+  state: string,
+  secret: string
+): { type: "github-oauth"; email: string } {
+  const payload = jwt.verify(state, secret);
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    payload.type !== "github-oauth" ||
+    typeof payload.email !== "string"
+  ) {
+    throw new Error("Invalid GitHub OAuth state.");
+  }
+
+  return {
+    type: "github-oauth",
+    email: payload.email
+  };
+}
+
+async function readGitHubOAuthAccount(db: AutoOpsDb, email: string) {
+  const connection = await db.getGitHubOAuthConnection(email);
+  if (!connection) {
+    return null;
+  }
+
+  return {
+    githubUserId: connection.githubUserId,
+    login: connection.login,
+    name: connection.name,
+    avatarUrl: connection.avatarUrl,
+    profileUrl: connection.profileUrl,
+    scope: connection.scope,
+    connectedAt: connection.connectedAt,
+    updatedAt: connection.updatedAt
+  };
 }

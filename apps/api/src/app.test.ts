@@ -1,6 +1,8 @@
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { encryptSecret } from "@autoops/core";
+
 import { createApp } from "./app.js";
 
 const config = {
@@ -15,6 +17,8 @@ const config = {
   GITHUB_APP_ID: 0,
   GITHUB_APP_SLUG: "",
   GITHUB_PRIVATE_KEY: "",
+  GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
+  GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
   MANAGED_APPS_DIR: "/opt/autoops-managed",
   MANAGED_BASE_DOMAIN: ""
@@ -82,6 +86,9 @@ function createDbMock() {
       updatedAt: new Date().toISOString()
     }),
     setGitHubInstallationSyncState: vi.fn().mockResolvedValue(undefined),
+    upsertGitHubOAuthConnection: vi.fn().mockResolvedValue(undefined),
+    getGitHubOAuthConnection: vi.fn().mockResolvedValue(null),
+    deleteGitHubOAuthConnection: vi.fn().mockResolvedValue(undefined),
     upsertGitHubRepositories: vi.fn().mockResolvedValue(undefined),
     listGitHubRepositories: vi.fn().mockResolvedValue([]),
     getGitHubRepository: vi.fn().mockResolvedValue({
@@ -200,10 +207,46 @@ function createDbMock() {
 function createGithubMock() {
   return {
     getInstallUrl: vi.fn().mockReturnValue("https://github.example/install"),
+    isOAuthConfigured: vi.fn().mockReturnValue(true),
+    getOAuthAuthorizeUrl: vi.fn().mockImplementation((state: string) => (
+      `https://github.com/login/oauth/authorize?state=${encodeURIComponent(state)}`
+    )),
+    getInstallation: vi.fn().mockResolvedValue({
+      installationId: 1,
+      accountLogin: "acme",
+      accountType: "Organization"
+    }),
+    exchangeOAuthCode: vi.fn().mockResolvedValue({
+      githubUserId: 99,
+      login: "octocat",
+      name: "The Octocat",
+      avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+      profileUrl: "https://github.com/octocat",
+      scope: "read:user,repo",
+      accessToken: "oauth-access-token"
+    }),
+    listUserRepositories: vi.fn().mockResolvedValue([
+      {
+        repoId: 101,
+        owner: "octocat",
+        name: "hello-world",
+        fullName: "octocat/hello-world",
+        description: "demo",
+        defaultBranch: "main",
+        isPrivate: false,
+        isArchived: false,
+        visibility: "public",
+        htmlUrl: "https://github.com/octocat/hello-world",
+        pushedAt: new Date().toISOString()
+      }
+    ]),
     fetchRepositoryFile: vi.fn(),
     fetchRepositoryFileOptional: vi.fn(),
+    fetchRepositoryFileWithOAuth: vi.fn(),
+    fetchRepositoryFileOptionalWithOAuth: vi.fn(),
     listInstallationRepositories: vi.fn().mockResolvedValue([]),
-    getBranchHeadSha: vi.fn().mockResolvedValue("abcdef1234567890")
+    getBranchHeadSha: vi.fn().mockResolvedValue("abcdef1234567890"),
+    getBranchHeadShaWithOAuth: vi.fn().mockResolvedValue("abcdef1234567890")
   };
 }
 
@@ -239,6 +282,68 @@ describe("createApp", () => {
     expect(response.status).toBe(200);
     expect(response.body.overview.metrics.projectCount).toBe(1);
     expect(db.getDashboardOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a GitHub OAuth authorization URL and stores the connected account", async () => {
+    const db = createDbMock();
+    db.getGitHubOAuthConnection.mockResolvedValue({
+      actorEmail: config.ADMIN_EMAIL,
+      githubUserId: 99,
+      login: "octocat",
+      name: "The Octocat",
+      avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+      profileUrl: "https://github.com/octocat",
+      scope: "read:user,repo",
+      encryptedAccessToken: encryptSecret("oauth-access-token", config.SECRET_MASTER_KEY),
+      connectedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    db.listGitHubRepositories.mockResolvedValue([]);
+    const github = createGithubMock();
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: github as any
+    });
+    const token = await getBearerToken(app);
+
+    const oauthUrlResponse = await request(app)
+      .get("/api/github/oauth-url")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(oauthUrlResponse.status).toBe(200);
+    expect(github.getOAuthAuthorizeUrl).toHaveBeenCalledTimes(1);
+
+    const state = new URL(oauthUrlResponse.body.url).searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    const completeResponse = await request(app)
+      .post("/api/github/oauth/complete")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        code: "oauth-code",
+        state
+      });
+
+    expect(completeResponse.status).toBe(200);
+    expect(github.exchangeOAuthCode).toHaveBeenCalledWith({
+      code: "oauth-code",
+      state
+    });
+    expect(db.upsertGitHubOAuthConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorEmail: config.ADMIN_EMAIL,
+        login: "octocat"
+      })
+    );
+
+    const repositoriesResponse = await request(app)
+      .get("/api/github/account/repositories")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(repositoriesResponse.status).toBe(200);
+    expect(github.listUserRepositories).toHaveBeenCalledWith("oauth-access-token");
+    expect(repositoriesResponse.body.repositories[0].fullName).toBe("octocat/hello-world");
   });
 
   it("parses run filters and forwards them to the db", async () => {
@@ -440,6 +545,41 @@ describe("createApp", () => {
     expect(response.body.repositories[0].deployabilityStatus).toBe("deployable");
   });
 
+  it("bootstraps a newly installed GitHub App installation before syncing", async () => {
+    const db = createDbMock();
+    db.getGitHubInstallation.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      installationId: 1,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repoCount: 0,
+      syncStatus: "idle",
+      lastSyncAt: null,
+      lastSyncError: null,
+      updatedAt: new Date().toISOString()
+    });
+    db.listGitHubRepositories.mockResolvedValue([]);
+
+    const github = createGithubMock();
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: github as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/github/installations/1/sync")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(github.getInstallation).toHaveBeenCalledWith(1);
+    expect(db.upsertGitHubInstallation).toHaveBeenCalledWith({
+      installationId: 1,
+      accountLogin: "acme",
+      accountType: "Organization"
+    });
+  });
+
   it("imports a deployable repository into a managed Next.js project", async () => {
     const db = createDbMock();
     db.getProjectByRepo = vi.fn().mockResolvedValue(null);
@@ -484,7 +624,10 @@ describe("createApp", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({
         installationId: 1,
-        repoId: 100
+        repoId: 100,
+        owner: "acme",
+        name: "demo",
+        defaultBranch: "main"
       });
 
     expect(response.status).toBe(201);
@@ -552,7 +695,188 @@ describe("createApp", () => {
         projectId: "project-managed",
         source: "manual_deploy",
         branch: "main",
-        commitSha: "abcdef1234567890"
+        commitSha: "abcdef1234567890",
+        metadata: {
+          repoAccess: {
+            type: "installation",
+            installationId: 1
+          }
+        }
+      })
+    );
+  });
+
+  it("imports an OAuth-connected repository without requiring an app installation", async () => {
+    const db = createDbMock();
+    db.getProjectByRepo = vi.fn().mockResolvedValue(null);
+    db.getGitHubOAuthConnection.mockResolvedValue({
+      actorEmail: config.ADMIN_EMAIL,
+      githubUserId: 99,
+      login: "octocat",
+      name: "The Octocat",
+      avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+      profileUrl: "https://github.com/octocat",
+      scope: "read:user,repo",
+      encryptedAccessToken: encryptSecret("oauth-access-token", config.SECRET_MASTER_KEY),
+      connectedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    const createdProject = {
+      id: "project-oauth",
+      name: "hello-world",
+      repoOwner: "octocat",
+      repoName: "hello-world",
+      installationId: 9000000000099,
+      mode: "managed_nextjs",
+      githubRepoId: 101,
+      defaultBranch: "main",
+      configPath: ".autoops/pipeline.yml",
+      appSlug: "octocat-hello-world-101",
+      primaryUrl: "http://localhost:6100",
+      managedConfig: {
+        framework: "nextjs",
+        packageManager: "pnpm",
+        installCommand: "pnpm install --frozen-lockfile",
+        buildCommand: "pnpm build",
+        startCommand: "pnpm start",
+        nodeVersion: "20",
+        outputPort: 3000
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      targetCount: 1,
+      latestRunStatus: null
+    };
+    db.createProject.mockResolvedValue(createdProject);
+    db.getProject.mockResolvedValue(createdProject);
+
+    const github = createGithubMock();
+    github.fetchRepositoryFileOptionalWithOAuth
+      .mockResolvedValueOnce(JSON.stringify({
+        dependencies: {
+          next: "^15.0.0"
+        },
+        scripts: {
+          build: "next build",
+          start: "next start"
+        },
+        packageManager: "pnpm@9.0.0"
+      }))
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce("lockfileVersion: '9.0'")
+      .mockResolvedValueOnce(null);
+
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: github as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/github/repositories/import")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        repoId: 101,
+        owner: "octocat",
+        name: "hello-world",
+        defaultBranch: "main",
+        isArchived: false
+      });
+
+    expect(response.status).toBe(201);
+    expect(db.upsertGitHubInstallation).toHaveBeenCalledWith({
+      installationId: 9000000000099,
+      accountLogin: "octocat",
+      accountType: "OAuth"
+    });
+    expect(db.createProject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoOwner: "octocat",
+        repoName: "hello-world",
+        installationId: 9000000000099,
+        mode: "managed_nextjs"
+      })
+    );
+    expect(db.linkGitHubRepositoryToProject).not.toHaveBeenCalled();
+  });
+
+  it("queues managed deployments through the connected GitHub OAuth account when no app installation exists", async () => {
+    const db = createDbMock();
+    db.getProject.mockResolvedValue({
+      id: "project-oauth",
+      name: "hello-world",
+      repoOwner: "octocat",
+      repoName: "hello-world",
+      installationId: 9000000000099,
+      mode: "managed_nextjs",
+      githubRepoId: 101,
+      defaultBranch: "main",
+      configPath: ".autoops/pipeline.yml",
+      appSlug: "octocat-hello-world-101",
+      primaryUrl: "http://localhost:6100",
+      managedConfig: {
+        framework: "nextjs",
+        packageManager: "pnpm",
+        installCommand: "pnpm install --frozen-lockfile",
+        buildCommand: "pnpm build",
+        startCommand: "pnpm start",
+        nodeVersion: "20",
+        outputPort: 3000
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      targetCount: 1,
+      latestRunStatus: null
+    });
+    db.getGitHubOAuthConnection.mockResolvedValue({
+      actorEmail: config.ADMIN_EMAIL,
+      githubUserId: 99,
+      login: "octocat",
+      name: "The Octocat",
+      avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+      profileUrl: "https://github.com/octocat",
+      scope: "read:user,repo",
+      encryptedAccessToken: encryptSecret("oauth-access-token", config.SECRET_MASTER_KEY),
+      connectedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    const github = createGithubMock();
+    github.getBranchHeadShaWithOAuth.mockResolvedValue("fedcba0987654321");
+
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: github as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/projects/project-oauth/deploy")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(202);
+    expect(github.getBranchHeadShaWithOAuth).toHaveBeenCalledWith({
+      owner: "octocat",
+      repo: "hello-world",
+      branch: "main",
+      accessToken: "oauth-access-token"
+    });
+    expect(db.createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-oauth",
+        source: "manual_deploy",
+        commitSha: "fedcba0987654321",
+        metadata: {
+          repoAccess: {
+            type: "oauth",
+            actorEmail: config.ADMIN_EMAIL
+          }
+        }
       })
     );
   });

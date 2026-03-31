@@ -6,18 +6,26 @@ import {
   ShieldCheck,
   Sparkles
 } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
-import type { GitHubRepositorySummary, ProjectInstallationSummary } from "@autoops/core";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import type {
+  GitHubConnectedAccount,
+  GitHubRepositorySummary,
+  GitHubUserRepositorySummary,
+  ProjectInstallationSummary
+} from "@autoops/core";
 
 import { useAppSession } from "../app-context";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState, InlineError, LoadingBlock } from "../components/States";
 import {
   createProject,
+  getGitHubAccount,
   getGitHubInstallUrl,
+  getGitHubOAuthUrl,
   importGitHubRepository,
   listGitHubInstallations,
   listGitHubRepositories,
+  listGitHubUserRepositories,
   syncGitHubInstallation
 } from "../lib/api";
 import { formatDateTime, formatRelativeTime } from "../lib/format";
@@ -30,9 +38,15 @@ const defaultSecretsJson = `{
 export function NewProjectPage() {
   const { token, refreshApp } = useAppSession();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const [githubAccount, setGitHubAccount] = useState<GitHubConnectedAccount | null>(null);
+  const [githubUserRepositories, setGitHubUserRepositories] = useState<
+    GitHubUserRepositorySummary[]
+  >([]);
   const [installations, setInstallations] = useState<ProjectInstallationSummary[]>([]);
   const [repositories, setRepositories] = useState<GitHubRepositorySummary[]>([]);
   const [installUrl, setInstallUrl] = useState("");
+  const [oauthUrl, setOauthUrl] = useState("");
   const [selectedInstallationId, setSelectedInstallationId] = useState("");
   const [repoSearch, setRepoSearch] = useState("");
   const [showDeployableOnly, setShowDeployableOnly] = useState(false);
@@ -53,6 +67,9 @@ export function NewProjectPage() {
   });
 
   const deferredSearch = useDeferredValue(repoSearch.trim().toLowerCase());
+  const connectedInstallationId = searchParams.get("installationId");
+  const showConnectedBanner =
+    searchParams.get("connected") === "1" || searchParams.get("oauth") === "connected";
 
   useEffect(() => {
     let active = true;
@@ -60,19 +77,52 @@ export function NewProjectPage() {
     setError("");
 
     void Promise.allSettled([
+      getGitHubAccount(token),
+      listGitHubUserRepositories(token),
+      getGitHubOAuthUrl(token),
       listGitHubInstallations(token),
       listGitHubRepositories(token),
       getGitHubInstallUrl(token)
     ])
-      .then(([installationsResult, repositoriesResult, installUrlResult]) => {
+      .then(([
+        accountResult,
+        userRepositoriesResult,
+        oauthUrlResult,
+        installationsResult,
+        repositoriesResult,
+        installUrlResult
+      ]) => {
         if (!active) {
           return;
+        }
+
+        if (accountResult.status === "fulfilled") {
+          setGitHubAccount(accountResult.value.account);
+        }
+
+        if (userRepositoriesResult.status === "fulfilled") {
+          setGitHubUserRepositories(userRepositoriesResult.value.repositories);
+        }
+
+        if (oauthUrlResult.status === "fulfilled") {
+          setOauthUrl(oauthUrlResult.value.url);
         }
 
         if (installationsResult.status === "fulfilled") {
           const nextInstallations = installationsResult.value.installations;
           setInstallations(nextInstallations);
-          if (!selectedInstallationId && nextInstallations[0]) {
+          const preferredInstallationId =
+            connectedInstallationId && nextInstallations.some(
+              (installation) =>
+                String(installation.installationId) === connectedInstallationId
+            )
+              ? connectedInstallationId
+              : selectedInstallationId;
+
+          if (preferredInstallationId) {
+            setSelectedInstallationId(preferredInstallationId);
+            setForm((current) => ({ ...current, installationId: preferredInstallationId }));
+          } else if (nextInstallations[0]) {
             const installationId = String(nextInstallations[0].installationId);
             setSelectedInstallationId(installationId);
             setForm((current) => ({ ...current, installationId }));
@@ -88,6 +138,9 @@ export function NewProjectPage() {
         }
 
         if (
+          accountResult.status === "rejected" &&
+          userRepositoriesResult.status === "rejected" &&
+          oauthUrlResult.status === "rejected" &&
           installationsResult.status === "rejected" &&
           repositoriesResult.status === "rejected" &&
           installUrlResult.status === "rejected"
@@ -104,9 +157,48 @@ export function NewProjectPage() {
     return () => {
       active = false;
     };
-  }, [selectedInstallationId, token]);
+  }, [connectedInstallationId, selectedInstallationId, token]);
+
+  const repositoriesByFullName = useMemo(() => {
+    return new Map(
+      repositories.map((repository) => [repository.fullName.toLowerCase(), repository])
+    );
+  }, [repositories]);
 
   const filteredRepositories = useMemo(() => {
+    if (githubUserRepositories.length > 0) {
+      return githubUserRepositories.filter((repository) => {
+        const autoOpsRepository = repositoriesByFullName.get(repository.fullName.toLowerCase());
+        const deployabilityStatus =
+          autoOpsRepository?.deployabilityStatus ?? repository.autoOpsDeployabilityStatus;
+        const linkedProjectId = autoOpsRepository?.linkedProjectId ?? repository.linkedProjectId;
+        if (
+          showDeployableOnly &&
+          deployabilityStatus !== "deployable" &&
+          !linkedProjectId
+        ) {
+          return false;
+        }
+        if (showImportedOnly && !linkedProjectId) {
+          return false;
+        }
+        if (!deferredSearch) {
+          return true;
+        }
+
+        return [
+          repository.owner,
+          repository.name,
+          repository.fullName,
+          repository.defaultBranch,
+          repository.description ?? ""
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(deferredSearch);
+      });
+    }
+
     return repositories.filter((repository) => {
       if (
         selectedInstallationId &&
@@ -136,7 +228,9 @@ export function NewProjectPage() {
     });
   }, [
     deferredSearch,
+    githubUserRepositories,
     repositories,
+    repositoriesByFullName,
     selectedInstallationId,
     showDeployableOnly,
     showImportedOnly
@@ -171,14 +265,25 @@ export function NewProjectPage() {
     }
   }
 
-  async function handleImportRepository(repository: GitHubRepositorySummary) {
+  async function handleImportRepository(
+    repository: GitHubRepositorySummary | GitHubUserRepositorySummary
+  ) {
     setImportingRepoId(repository.repoId);
     setError("");
 
     try {
       const response = await importGitHubRepository(token, {
-        installationId: repository.installationId,
-        repoId: repository.repoId
+        installationId:
+          "installationId" in repository && typeof repository.installationId === "number"
+            ? repository.installationId
+            : undefined,
+        repoId: repository.repoId,
+        owner: repository.owner,
+        name: repository.name,
+        defaultBranch: repository.defaultBranch,
+        htmlUrl: repository.htmlUrl,
+        isPrivate: repository.isPrivate,
+        isArchived: repository.isArchived
       });
       refreshApp();
       navigate(`/projects/${response.project.id}`);
@@ -221,6 +326,16 @@ export function NewProjectPage() {
 
   return (
     <div className="page-stack">
+      {showConnectedBanner ? (
+        <div className="success-banner">
+          <strong>GitHub connected</strong>
+          <span>
+            {searchParams.get("oauth") === "connected"
+              ? "AutoOps signed in with GitHub and loaded the repository catalog below."
+              : "AutoOps returned from GitHub, synced the installation, and loaded the visible repositories below."}
+          </span>
+        </div>
+      ) : null}
       {error ? <InlineError message={error} /> : null}
 
       <section className="content-grid onboarding-layout">
@@ -237,39 +352,92 @@ export function NewProjectPage() {
             <div className="guide-step">
               <span>1</span>
               <div>
-                <strong>Install the AutoOps GitHub App</strong>
-                <p>Grant AutoOps access only to the personal or org repos you want to manage.</p>
+                <strong>Connect GitHub with OAuth</strong>
+                <p>Sign in with GitHub so AutoOps can show the repositories your account can access.</p>
               </div>
             </div>
 
             <div className="guide-step">
               <span>2</span>
               <div>
-                <strong>Sync an installation</strong>
-                <p>AutoOps analyzes the accessible repos and flags which ones are eligible.</p>
+                <strong>Import directly from GitHub</strong>
+                <p>OAuth-connected repos can be imported straight into AutoOps for manual deployment.</p>
               </div>
             </div>
 
             <div className="guide-step">
               <span>3</span>
               <div>
+                <strong>Optionally install the AutoOps GitHub App</strong>
+                <p>Add the app later if you want installation-level controls and webhook-driven redeploys.</p>
+              </div>
+            </div>
+
+            <div className="guide-step">
+              <span>4</span>
+              <div>
                 <strong>Import a Next.js app</strong>
-                <p>Deployable repos can be imported into a managed VPS target with one action.</p>
+                <p>AutoOps validates the repo during import, then you can deploy it onto the managed VPS target.</p>
               </div>
             </div>
           </div>
 
-          {installUrl ? (
-            <a className="button-link" href={installUrl} target="_blank" rel="noreferrer">
-              <ExternalLink size={16} />
-              <span>Open GitHub Install Flow</span>
-            </a>
-          ) : (
-            <EmptyState
-              title="Install URL unavailable"
-              description="The GitHub App slug is not configured yet on this server."
-            />
-          )}
+          <div className="row-actions">
+            {oauthUrl ? (
+              <button
+                type="button"
+                onClick={() => window.location.assign(oauthUrl)}
+              >
+                <ExternalLink size={16} />
+                <span>{githubAccount ? "Reconnect GitHub" : "Connect GitHub"}</span>
+              </button>
+            ) : (
+              <EmptyState
+                title="OAuth unavailable"
+                description="GitHub OAuth client credentials are not configured yet on this server."
+              />
+            )}
+
+            {installUrl ? (
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => window.location.assign(installUrl)}
+              >
+                <ShieldCheck size={16} />
+                <span>Install AutoOps GitHub App</span>
+              </button>
+            ) : null}
+          </div>
+
+          <p className="muted-copy">
+            GitHub opens in this tab. OAuth is enough to import and deploy supported repos.
+            The AutoOps GitHub App is optional and mainly adds webhook-based automation.
+          </p>
+
+          {githubAccount ? (
+            <div className="account-summary-card">
+              {githubAccount.avatarUrl ? (
+                <img
+                  className="account-avatar"
+                  src={githubAccount.avatarUrl}
+                  alt={githubAccount.login}
+                />
+              ) : null}
+              <div>
+                <strong>{githubAccount.name ?? githubAccount.login}</strong>
+                <p>
+                  Connected as{" "}
+                  <a href={githubAccount.profileUrl} target="_blank" rel="noreferrer">
+                    @{githubAccount.login}
+                  </a>
+                </p>
+                <small>
+                  Scope {githubAccount.scope ?? "default"} • Connected {formatDateTime(githubAccount.connectedAt)}
+                </small>
+              </div>
+            </div>
+          ) : null}
 
           <div className="installation-list">
             <div className="panel-heading compact">
@@ -311,7 +479,7 @@ export function NewProjectPage() {
             ) : (
               <EmptyState
                 title="No installations recorded"
-                description="Complete the GitHub App installation flow first, then sync a connected account."
+                description="This section is optional. Install the AutoOps GitHub App later if you want webhook-driven redeploys and installation sync."
               />
             )}
 
@@ -342,7 +510,7 @@ export function NewProjectPage() {
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Repository catalog</p>
-              <h3>Visible repositories</h3>
+              <h3>{githubAccount ? "Your GitHub repositories" : "Visible repositories"}</h3>
             </div>
             <Sparkles size={18} />
           </div>
@@ -377,68 +545,31 @@ export function NewProjectPage() {
           {filteredRepositories.length > 0 ? (
             <div className="stack-list repo-catalog-list">
               {filteredRepositories.map((repository) => (
-                <div className="repo-catalog-card" key={`${repository.installationId}-${repository.repoId}`}>
-                  <div className="row-spread">
-                    <div>
-                      <strong>{repository.fullName}</strong>
-                      <p>
-                        Branch {repository.defaultBranch}
-                        {repository.pushedAt
-                          ? ` • Updated ${formatRelativeTime(repository.pushedAt)}`
-                          : ""}
-                      </p>
-                    </div>
-                    <StatusBadge status={repository.deployabilityStatus} />
-                  </div>
-
-                  <div className="project-meta-row">
-                    <span>
-                      {repository.isPrivate ? "Private" : "Public"} repo
-                    </span>
-                    <span>Installation #{repository.installationId}</span>
-                    <span>{repository.detectedFramework ?? "Framework pending"}</span>
-                    <span>{repository.packageManager ?? "No package manager detected"}</span>
-                  </div>
-
-                  <p className="muted-copy">
-                    {repository.deployabilityReason ??
-                      (repository.linkedProjectId
-                        ? "Already imported into AutoOps."
-                        : "Eligible for one-click managed import.")}
-                  </p>
-
-                  <div className="row-actions">
-                    {repository.linkedProjectId ? (
-                      <Link className="button-link" to={`/projects/${repository.linkedProjectId}`}>
-                        Open Project
-                      </Link>
-                    ) : repository.deployabilityStatus === "deployable" ? (
-                      <button
-                        type="button"
-                        onClick={() => void handleImportRepository(repository)}
-                        disabled={importingRepoId === repository.repoId}
-                      >
-                        {importingRepoId === repository.repoId ? "Importing..." : "Import To AutoOps"}
-                      </button>
-                    ) : (
-                      <a
-                        className="button-link subtle-link"
-                        href={repository.htmlUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        View on GitHub
-                      </a>
-                    )}
-                    <small>{formatDateTime(repository.syncedAt)}</small>
-                  </div>
-                </div>
+                <RepositoryCatalogCard
+                  key={`catalog-${repository.repoId}`}
+                  repository={repository}
+                  autoOpsRepository={resolveAutoOpsRepository(repository, repositoriesByFullName)}
+                  importingRepoId={importingRepoId}
+                  onImport={handleImportRepository}
+                />
               ))}
             </div>
-          ) : (
+          ) : githubAccount ? (
             <EmptyState
               title="No repositories match the current filters"
-              description="Sync an installation or widen the filters to see more repositories."
+              description="Try another search term or widen the current filters."
+            />
+          ) : (
+            <EmptyState
+              title="Connect GitHub to load your repositories"
+              description="OAuth is now the main discovery flow. After connecting GitHub, AutoOps will show the repositories your account can access and which ones are ready for management."
+              action={
+                oauthUrl ? (
+                  <button type="button" onClick={() => window.location.assign(oauthUrl)}>
+                    Connect GitHub
+                  </button>
+                ) : undefined
+              }
             />
           )}
         </article>
@@ -551,6 +682,101 @@ export function NewProjectPage() {
       </form>
     </div>
   );
+}
+
+function RepositoryCatalogCard(props: {
+  repository: GitHubRepositorySummary | GitHubUserRepositorySummary;
+  autoOpsRepository: GitHubRepositorySummary | null;
+  importingRepoId: number | null;
+  onImport: (repository: GitHubRepositorySummary | GitHubUserRepositorySummary) => Promise<void>;
+}) {
+  const autoOpsRepository = props.autoOpsRepository;
+  const linkedProjectId = autoOpsRepository?.linkedProjectId ?? props.repository.linkedProjectId;
+  const status = linkedProjectId
+    ? "imported"
+    : autoOpsRepository
+      ? autoOpsRepository.deployabilityStatus
+      : "connected";
+
+  return (
+    <div className="repo-catalog-card">
+      <div className="row-spread">
+        <div>
+          <strong>{props.repository.fullName}</strong>
+          <p>
+            Branch {props.repository.defaultBranch}
+            {props.repository.pushedAt
+              ? ` • Updated ${formatRelativeTime(props.repository.pushedAt)}`
+              : ""}
+          </p>
+        </div>
+        <StatusBadge status={status} />
+      </div>
+
+      <div className="project-meta-row">
+        <span>{props.repository.isPrivate ? "Private" : "Public"} repo</span>
+        {"visibility" in props.repository ? <span>{props.repository.visibility}</span> : null}
+        {autoOpsRepository ? <span>Installation #{autoOpsRepository.installationId}</span> : null}
+        {autoOpsRepository ? (
+          <span>{autoOpsRepository.detectedFramework ?? "Framework pending"}</span>
+        ) : (
+          <span>GitHub OAuth access</span>
+        )}
+        {autoOpsRepository ? (
+          <span>{autoOpsRepository.packageManager ?? "No package manager detected"}</span>
+        ) : null}
+      </div>
+
+      <p className="muted-copy">
+        {linkedProjectId
+          ? "Already imported into AutoOps."
+          : autoOpsRepository
+          ? autoOpsRepository.deployabilityReason ??
+            "Eligible for one-click managed import."
+          : "This repo is available through your GitHub connection. AutoOps will validate it during import and can deploy supported Next.js apps immediately."}
+      </p>
+
+      <div className="row-actions">
+        {linkedProjectId ? (
+          <Link className="button-link" to={`/projects/${linkedProjectId}`}>
+            Open Project
+          </Link>
+        ) : autoOpsRepository?.deployabilityStatus === "unsupported" ||
+          autoOpsRepository?.deployabilityStatus === "archived" ? (
+          <a
+            className="button-link subtle-link"
+            href={props.repository.htmlUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View on GitHub
+          </a>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void props.onImport(autoOpsRepository ?? props.repository)}
+            disabled={props.importingRepoId === props.repository.repoId}
+          >
+            {props.importingRepoId === props.repository.repoId ? "Importing..." : "Import To AutoOps"}
+          </button>
+        )}
+        {"syncedAt" in props.repository && typeof props.repository.syncedAt === "string" ? (
+          <small>{formatDateTime(props.repository.syncedAt)}</small>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function resolveAutoOpsRepository(
+  repository: GitHubRepositorySummary | GitHubUserRepositorySummary,
+  repositoriesByFullName: Map<string, GitHubRepositorySummary>
+): GitHubRepositorySummary | null {
+  if ("deployabilityStatus" in repository) {
+    return repository;
+  }
+
+  return repositoriesByFullName.get(repository.fullName.toLowerCase()) ?? null;
 }
 
 function renderInstallationMeta(installation: ProjectInstallationSummary | null) {

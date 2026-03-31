@@ -136,7 +136,13 @@ export class GitHubWebhookService {
         source: "push",
         branch,
         commitSha,
-        triggeredBy
+        triggeredBy,
+        metadata: {
+          repoAccess: {
+            type: "installation",
+            installationId
+          }
+        }
       });
       await this.db.supersedeQueuedRuns(project.id, branch, run.id);
       await this.db.recordWebhookDelivery({

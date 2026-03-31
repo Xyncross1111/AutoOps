@@ -12,6 +12,8 @@ const configSchema = z.object({
   GITHUB_APP_ID: z.string().default("0"),
   GITHUB_APP_SLUG: z.string().default(""),
   GITHUB_PRIVATE_KEY: z.string().default(""),
+  GITHUB_OAUTH_CLIENT_ID: z.string().default(""),
+  GITHUB_OAUTH_CLIENT_SECRET: z.string().default(""),
   GITHUB_WEBHOOK_SECRET: z.string().min(1),
   MANAGED_APPS_DIR: z.string().default("/opt/autoops-managed"),
   MANAGED_BASE_DOMAIN: z.string().default("")
