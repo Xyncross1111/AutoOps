@@ -100,8 +100,13 @@ export class GitHubWebhookService {
       };
     }
 
-    const project = await this.db.getProjectByRepo(repoOwner, repoName);
-    if (!project) {
+    const projects =
+      typeof (this.db as AutoOpsDb & { listProjectsByRepo?: unknown }).listProjectsByRepo === "function"
+        ? await this.db.listProjectsByRepo(repoOwner, repoName)
+        : await this.db
+            .getProjectByRepo(repoOwner, repoName)
+            .then((project) => (project ? [project] : []));
+    if (projects.length === 0) {
       await this.db.recordWebhookDelivery({
         deliveryId,
         eventName,
@@ -115,19 +120,50 @@ export class GitHubWebhookService {
     }
 
     const branch = normalizeGitRef(ref);
+    const runIds: string[] = [];
+    let ignoredReason: string | null = null;
 
-    if (project.mode === "managed_nextjs") {
-      if (branch !== project.defaultBranch) {
-        await this.db.recordWebhookDelivery({
+    for (const project of projects) {
+      if (project.mode === "managed_nextjs") {
+        if (branch !== project.defaultBranch) {
+          ignoredReason =
+            ignoredReason ??
+            `Branch ${branch} does not match the managed deployment branch ${project.defaultBranch}.`;
+          continue;
+        }
+
+        const run = await this.db.createRun({
+          projectId: project.id,
           deliveryId,
-          eventName,
-          payload,
-          status: "ignored",
-          errorMessage: `Branch ${branch} does not match the managed deployment branch ${project.defaultBranch}.`
+          source: "push",
+          branch,
+          commitSha,
+          triggeredBy,
+          metadata: {
+            repoAccess: {
+              type: "installation",
+              installationId
+            }
+          }
         });
-        return {
-          status: "ignored" as const
-        };
+        await this.db.supersedeQueuedRuns(project.id, branch, run.id);
+        runIds.push(run.id);
+        continue;
+      }
+
+      const configContents = await this.github.fetchRepositoryFile({
+        installationId,
+        owner: repoOwner,
+        repo: repoName,
+        path: project.configPath,
+        ref: commitSha
+      });
+      const pipelineConfig = parsePipelineConfig(configContents);
+      if (!matchesPushTrigger(pipelineConfig, ref)) {
+        ignoredReason =
+          ignoredReason ??
+          `Branch ${normalizeGitRef(ref)} does not match the configured push trigger.`;
+        continue;
       }
 
       const run = await this.db.createRun({
@@ -137,72 +173,39 @@ export class GitHubWebhookService {
         branch,
         commitSha,
         triggeredBy,
+        pipelineConfig,
         metadata: {
-          repoAccess: {
-            type: "installation",
-            installationId
-          }
+          deliveryId,
+          pipelineConfig
         }
       });
       await this.db.supersedeQueuedRuns(project.id, branch, run.id);
-      await this.db.recordWebhookDelivery({
-        deliveryId,
-        eventName,
-        payload,
-        status: "processed",
-        runId: run.id
-      });
-      return {
-        status: "processed" as const,
-        runId: run.id
-      };
+      runIds.push(run.id);
     }
 
-    const configContents = await this.github.fetchRepositoryFile({
-      installationId,
-      owner: repoOwner,
-      repo: repoName,
-      path: project.configPath,
-      ref: commitSha
-    });
-    const pipelineConfig = parsePipelineConfig(configContents);
-    if (!matchesPushTrigger(pipelineConfig, ref)) {
+    if (runIds.length === 0) {
       await this.db.recordWebhookDelivery({
         deliveryId,
         eventName,
         payload,
         status: "ignored",
-        errorMessage: `Branch ${normalizeGitRef(ref)} does not match the configured push trigger.`
+        errorMessage: ignoredReason ?? "No matching AutoOps project accepted this push."
       });
       return {
         status: "ignored" as const
       };
     }
 
-    const run = await this.db.createRun({
-      projectId: project.id,
-      deliveryId,
-      source: "push",
-      branch,
-      commitSha,
-      triggeredBy,
-      pipelineConfig,
-      metadata: {
-        deliveryId,
-        pipelineConfig
-      }
-    });
-    await this.db.supersedeQueuedRuns(project.id, branch, run.id);
     await this.db.recordWebhookDelivery({
       deliveryId,
       eventName,
       payload,
       status: "processed",
-      runId: run.id
+      runId: runIds[0]
     });
     return {
       status: "processed" as const,
-      runId: run.id
+      runId: runIds[0]
     };
   }
 }

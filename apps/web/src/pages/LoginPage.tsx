@@ -3,12 +3,13 @@ import { LockKeyhole, Sparkles } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { InlineError } from "../components/States";
-import { login } from "../lib/api";
+import { login, register } from "../lib/api";
 
 export function LoginPage(props: {
   onAuthenticated: (token: string, email: string) => void;
 }) {
   const navigate = useNavigate();
+  const [mode, setMode] = useState<"login" | "register">("login");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -20,14 +21,22 @@ export function LoginPage(props: {
     setError("");
 
     try {
-      const response = await login(
-        String(form.get("email") ?? ""),
-        String(form.get("password") ?? "")
-      );
+      const email = String(form.get("email") ?? "");
+      const password = String(form.get("password") ?? "");
+      const response =
+        mode === "login"
+          ? await login(email, password)
+          : await register(email, password);
       props.onAuthenticated(response.token, response.user.email);
       navigate("/", { replace: true });
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "Login failed.");
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : mode === "login"
+            ? "Login failed."
+            : "Account creation failed."
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -56,11 +65,36 @@ export function LoginPage(props: {
 
       <form className="login-card" onSubmit={handleSubmit}>
         <div className="card-frame">
-          <p className="eyebrow">Bootstrap access</p>
-          <h2>Sign in to AutoOps</h2>
+          <p className="eyebrow">Operator access</p>
+          <h2>{mode === "login" ? "Sign in to AutoOps" : "Create your AutoOps account"}</h2>
           <p className="muted-copy">
-            Use the bootstrap admin account configured on this server.
+            {mode === "login"
+              ? "Sign in with your AutoOps account to access your projects and connected GitHub workspace."
+              : "Create a personal AutoOps login, then connect your own GitHub account and import repositories."}
           </p>
+
+          <div className="auth-mode-toggle">
+            <button
+              type="button"
+              className={mode === "login" ? "secondary" : "ghost"}
+              onClick={() => {
+                setMode("login");
+                setError("");
+              }}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              className={mode === "register" ? "secondary" : "ghost"}
+              onClick={() => {
+                setMode("register");
+                setError("");
+              }}
+            >
+              Create Account
+            </button>
+          </div>
 
           <label>
             <span>Email</span>
@@ -68,8 +102,8 @@ export function LoginPage(props: {
               required
               name="email"
               type="email"
-              placeholder="admin@autoops.local"
-              defaultValue="admin@autoops.local"
+              autoComplete="email"
+              placeholder="you@company.com"
             />
           </label>
 
@@ -79,12 +113,20 @@ export function LoginPage(props: {
               required
               name="password"
               type="password"
-              placeholder="Enter your password"
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              minLength={6}
+              placeholder={mode === "login" ? "Enter your password" : "Choose a password"}
             />
           </label>
 
           <button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? "Signing In..." : "Enter Control Plane"}
+            {isSubmitting
+              ? mode === "login"
+                ? "Signing In..."
+                : "Creating Account..."
+              : mode === "login"
+                ? "Enter Control Plane"
+                : "Create Account"}
           </button>
 
           {error ? <InlineError message={error} /> : null}

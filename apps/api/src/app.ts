@@ -6,7 +6,13 @@ import { z } from "zod";
 import { decryptSecret, encryptSecret, verifyGitHubSignature } from "@autoops/core";
 import type { AutoOpsDb } from "@autoops/db";
 
-import { createAuthHelpers, type AuthenticatedRequest } from "./auth.js";
+import {
+  createAuthHelpers,
+  hashPassword,
+  normalizeEmail,
+  type AuthenticatedRequest,
+  verifyPassword
+} from "./auth.js";
 import type { ApiConfig } from "./config.js";
 import type { GitHubAppService } from "./github-app.js";
 import { analyzeRepository, buildManagedNextjsConfig } from "./repo-analysis.js";
@@ -16,9 +22,9 @@ interface RawBodyRequest extends AuthenticatedRequest {
   rawBody?: string;
 }
 
-const loginSchema = z.object({
+const credentialsSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(1)
+  password: z.string().min(6)
 });
 
 const createProjectSchema = z.object({
@@ -125,28 +131,98 @@ export function createApp(args: {
     res.json({ ok: true });
   }));
 
-  app.post("/api/auth/login", (req, res) => {
-    const parsed = loginSchema.safeParse(req.body);
+  app.post("/api/auth/register", asyncRoute(async (req, res) => {
+    const parsed = credentialsSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+
+    const email = normalizeEmail(parsed.data.email);
+    const existingUser = await db.getUserByEmail(email);
+    if (existingUser) {
+      res.status(409).json({ error: "An account already exists for this email." });
+      return;
+    }
+
+    const user = await db.createUser({
+      email,
+      passwordHash: hashPassword(parsed.data.password)
+    });
+    const token = auth.signToken(user.email);
+
+    res.status(201).json({
+      token,
+      user: {
+        email: user.email
+      }
+    });
+  }));
+
+  app.post("/api/auth/login", asyncRoute(async (req, res) => {
+    const parsed = credentialsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    const email = normalizeEmail(parsed.data.email);
+    const user = await db.getUserByEmail(email);
+
+    if (user) {
+      if (!verifyPassword(parsed.data.password, user.passwordHash)) {
+        res.status(401).json({ error: "Invalid credentials." });
+        return;
+      }
+
+      const token = auth.signToken(user.email);
+      res.json({ token, user: { email: user.email } });
+      return;
+    }
+
     if (
-      parsed.data.email !== config.ADMIN_EMAIL ||
+      email !== normalizeEmail(config.ADMIN_EMAIL) ||
       parsed.data.password !== config.ADMIN_PASSWORD
     ) {
       res.status(401).json({ error: "Invalid credentials." });
       return;
     }
-    const token = auth.signToken(parsed.data.email);
-    res.json({ token, user: { email: parsed.data.email } });
-  });
+
+    const bootstrapUser = await db.upsertUserPassword({
+      email,
+      passwordHash: hashPassword(parsed.data.password)
+    });
+    await db.claimUnownedProjects(email);
+
+    const token = auth.signToken(bootstrapUser.email);
+    res.json({
+      token,
+      user: {
+        email: bootstrapUser.email
+      }
+    });
+  }));
 
   app.use("/api", (req, res, next) => auth.authenticate(req, res, next));
 
-  app.get("/api/auth/me", (req: RawBodyRequest, res) => {
-    res.json({ user: req.user });
-  });
+  app.get("/api/auth/me", asyncRoute(async (req, res) => {
+    if (!req.user?.email) {
+      res.status(401).json({ error: "Missing authenticated user." });
+      return;
+    }
+
+    const user = await db.getUserByEmail(req.user.email);
+    if (!user) {
+      res.status(401).json({ error: "Authenticated user no longer exists." });
+      return;
+    }
+
+    res.json({
+      user: {
+        email: user.email
+      }
+    });
+  }));
 
   app.get("/api/github/oauth-url", (req: RawBodyRequest, res) => {
     if (!req.user?.email) {
@@ -246,11 +322,12 @@ export function createApp(args: {
     const [userRepositories, autoOpsRepositories, projects] = await Promise.all([
       github.listUserRepositories(accessToken),
       db.listGitHubRepositories(),
-      db.listProjects()
+      db.listProjects(req.user.email)
     ]);
     const autoOpsRepositoriesByName = new Map(
       autoOpsRepositories.map((repository) => [repository.fullName.toLowerCase(), repository])
     );
+    const ownedProjectIds = new Set(projects.map((project) => project.id));
     const projectsByName = new Map(
       projects.map((project) => [
         `${project.repoOwner}/${project.repoName}`.toLowerCase(),
@@ -261,14 +338,18 @@ export function createApp(args: {
     res.json({
       repositories: userRepositories.map((repository) => {
         const linkedRepository = autoOpsRepositoriesByName.get(repository.fullName.toLowerCase());
+        const ownedLinkedProjectId =
+          linkedRepository?.linkedProjectId && ownedProjectIds.has(linkedRepository.linkedProjectId)
+            ? linkedRepository.linkedProjectId
+            : null;
         const linkedProject =
-          linkedRepository?.linkedProjectId
+          ownedLinkedProjectId
             ? null
             : projectsByName.get(repository.fullName.toLowerCase()) ?? null;
         return {
           ...repository,
           installationId: linkedRepository?.installationId ?? null,
-          linkedProjectId: linkedRepository?.linkedProjectId ?? linkedProject?.id ?? null,
+          linkedProjectId: ownedLinkedProjectId ?? linkedProject?.id ?? null,
           autoOpsDeployabilityStatus:
             linkedRepository?.deployabilityStatus ??
             (linkedProject ? "imported" : null)
@@ -277,9 +358,13 @@ export function createApp(args: {
     });
   }));
 
-  app.get("/api/dashboard/overview", asyncRoute(async (_req, res) => {
+  app.get("/api/dashboard/overview", asyncRoute(async (req, res) => {
+    if (!req.user?.email) {
+      res.status(401).json({ error: "Missing authenticated user." });
+      return;
+    }
     res.json({
-      overview: await db.getDashboardOverview()
+      overview: await db.getDashboardOverview(req.user.email)
     });
   }));
 
@@ -368,8 +453,16 @@ export function createApp(args: {
       res.status(400).json({ error: parsed.error.flatten() });
       return;
     }
+    if (!req.user?.email) {
+      res.status(401).json({ error: "Missing authenticated user." });
+      return;
+    }
 
-    const existingProject = await db.getProjectByRepo(parsed.data.owner, parsed.data.name);
+    const existingProject = await db.getProjectByRepo(
+      parsed.data.owner,
+      parsed.data.name,
+      req.user.email
+    );
     if (existingProject) {
       res.status(409).json({ error: "A project already exists for this repository." });
       return;
@@ -470,6 +563,7 @@ export function createApp(args: {
       : null;
     const runtimeDir = `${trimTrailingSlash(config.MANAGED_APPS_DIR)}/apps/${appSlug}`;
     const project = await db.createProject({
+      ownerEmail: req.user.email,
       name: parsed.data.name,
       repoOwner: parsed.data.owner,
       repoName: parsed.data.name,
@@ -513,7 +607,7 @@ export function createApp(args: {
     );
 
     res.status(201).json({
-      project: await db.getProject(project.id)
+      project: await db.getProject(project.id, req.user.email)
     });
   }));
 
@@ -536,6 +630,7 @@ export function createApp(args: {
     );
     const project = await db.createProject({
       ...parsed.data,
+      ownerEmail: req.user?.email ?? null,
       secrets: encryptedSecrets
     });
     await db.writeAuditLog(
@@ -551,13 +646,13 @@ export function createApp(args: {
     res.status(201).json({ project });
   }));
 
-  app.get("/api/projects", asyncRoute(async (_req, res) => {
-    res.json({ projects: await db.listProjects() });
+  app.get("/api/projects", asyncRoute(async (req, res) => {
+    res.json({ projects: await db.listProjects(req.user?.email) });
   }));
 
   app.get("/api/projects/:id", asyncRoute(async (req, res) => {
     const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const detail = await db.getProjectDetail(projectId);
+    const detail = await db.getProjectDetail(projectId, req.user?.email);
     if (!detail) {
       res.status(404).json({ error: "Project not found." });
       return;
@@ -587,7 +682,7 @@ export function createApp(args: {
       defaultBranch: parsed.data.defaultBranch,
       configPath: parsed.data.configPath,
       secrets: encryptedSecrets
-    });
+    }, req.user?.email);
 
     if (!project) {
       res.status(404).json({ error: "Project not found." });
@@ -610,7 +705,7 @@ export function createApp(args: {
 
   app.post("/api/projects/:id/deploy", asyncRoute(async (req, res) => {
     const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const project = await db.getProject(projectId);
+    const project = await db.getProject(projectId, req.user?.email);
     if (!project) {
       res.status(404).json({ error: "Project not found." });
       return;
@@ -695,25 +790,25 @@ export function createApp(args: {
       return;
     }
 
-    res.json({ runs: await db.listRuns(parsed.data) });
+    res.json({ runs: await db.listRuns(parsed.data, req.user?.email) });
   }));
 
   app.get("/api/runs/:id", asyncRoute(async (req, res) => {
     const runId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const detail = await db.getRunDetail(runId);
+    const detail = await db.getRunDetail(runId, req.user?.email);
     if (!detail) {
       res.status(404).json({ error: "Run not found." });
       return;
     }
     res.json({
       ...detail,
-      logs: await db.listRunLogs(runId, 0)
+      logs: await db.listRunLogs(runId, 0, req.user?.email)
     });
   }));
 
   app.get("/api/runs/:id/stream", asyncRoute(async (req, res) => {
     const runId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const detail = await db.getRunDetail(runId);
+    const detail = await db.getRunDetail(runId, req.user?.email);
     if (!detail) {
       res.status(404).json({ error: "Run not found." });
       return;
@@ -727,13 +822,13 @@ export function createApp(args: {
 
     let lastSeenId = 0;
     const sendLogs = async () => {
-      const logs = await db.listRunLogs(runId, lastSeenId);
+      const logs = await db.listRunLogs(runId, lastSeenId, req.user?.email);
       for (const log of logs) {
         lastSeenId = log.id;
         res.write(`event: log\n`);
         res.write(`data: ${JSON.stringify(log)}\n\n`);
       }
-      const latestDetail = await db.getRunDetail(runId);
+      const latestDetail = await db.getRunDetail(runId, req.user?.email);
       if (latestDetail) {
         res.write(`event: status\n`);
         res.write(`data: ${JSON.stringify(latestDetail.run)}\n\n`);
@@ -759,7 +854,7 @@ export function createApp(args: {
 
   app.post("/api/runs/:id/rerun", asyncRoute(async (req, res) => {
     const runId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const run = await db.rerun(runId, req.user?.email ?? "unknown");
+    const run = await db.rerun(runId, req.user?.email ?? "unknown", req.user?.email);
     await db.writeAuditLog(
       req.user?.email ?? "unknown",
       "run.rerun",
@@ -770,16 +865,16 @@ export function createApp(args: {
     res.status(201).json({ run });
   }));
 
-  app.get("/api/deployments", asyncRoute(async (_req, res) => {
+  app.get("/api/deployments", asyncRoute(async (req, res) => {
     res.json({
-      targets: await db.listDeploymentTargets(),
-      revisions: await db.listDeploymentRevisions()
+      targets: await db.listDeploymentTargets(undefined, req.user?.email),
+      revisions: await db.listDeploymentRevisions(100, req.user?.email)
     });
   }));
 
   app.get("/api/deployments/targets/:id", asyncRoute(async (req, res) => {
     const targetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const detail = await db.getDeploymentTargetDetail(targetId);
+    const detail = await db.getDeploymentTargetDetail(targetId, req.user?.email);
     if (!detail) {
       res.status(404).json({ error: "Deployment target not found." });
       return;
@@ -796,7 +891,7 @@ export function createApp(args: {
     const run = await db.enqueueRollbackRun({
       ...parsed.data,
       initiatedBy: req.user?.email ?? "unknown"
-    });
+    }, req.user?.email);
     await db.writeAuditLog(
       req.user?.email ?? "unknown",
       "rollback.enqueued",
@@ -815,7 +910,7 @@ export function createApp(args: {
     }
 
     res.json({
-      events: await db.listActivityEvents(parsed.data)
+      events: await db.listActivityEvents(parsed.data, req.user?.email)
     });
   }));
 
@@ -1043,7 +1138,7 @@ function createGitHubOAuthState(email: string, secret: string): string {
   return jwt.sign(
     {
       type: "github-oauth",
-      email
+      email: normalizeEmail(email)
     },
     secret,
     {
@@ -1068,7 +1163,7 @@ function verifyGitHubOAuthState(
 
   return {
     type: "github-oauth",
-    email: payload.email
+    email: normalizeEmail(payload.email)
   };
 }
 

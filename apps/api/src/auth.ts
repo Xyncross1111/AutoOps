@@ -1,3 +1,5 @@
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+
 import jwt from "jsonwebtoken";
 import type { NextFunction, Request, Response } from "express";
 
@@ -9,15 +11,44 @@ export interface AuthenticatedRequest extends Request {
   };
 }
 
+export function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const hash = scryptSync(password, salt, 64).toString("hex");
+  return `scrypt:${salt}:${hash}`;
+}
+
+export function verifyPassword(password: string, storedHash: string): boolean {
+  const [algorithm, salt, expectedHash] = storedHash.split(":");
+  if (algorithm !== "scrypt" || !salt || !expectedHash) {
+    return false;
+  }
+
+  const derived = scryptSync(password, salt, 64);
+  const expected = Buffer.from(expectedHash, "hex");
+
+  if (derived.length !== expected.length) {
+    return false;
+  }
+
+  return timingSafeEqual(derived, expected);
+}
+
 export function createAuthHelpers(config: ApiConfig) {
   return {
     signToken(email: string): string {
-      return jwt.sign({ email }, config.JWT_SECRET, {
+      return jwt.sign({ email: normalizeEmail(email) }, config.JWT_SECRET, {
         expiresIn: "12h"
       });
     },
     verifyToken(token: string): { email: string } {
-      return jwt.verify(token, config.JWT_SECRET) as { email: string };
+      const payload = jwt.verify(token, config.JWT_SECRET) as { email: string };
+      return {
+        email: normalizeEmail(payload.email)
+      };
     },
     authenticate(
       req: AuthenticatedRequest,

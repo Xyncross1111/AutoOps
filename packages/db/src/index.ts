@@ -32,6 +32,13 @@ import type {
 } from "@autoops/core";
 
 const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS users (
+  email TEXT PRIMARY KEY,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS github_installations (
   installation_id BIGINT PRIMARY KEY,
   account_login TEXT NOT NULL,
@@ -46,6 +53,7 @@ CREATE TABLE IF NOT EXISTS github_installations (
 
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
+  owner_email TEXT,
   name TEXT NOT NULL,
   repo_owner TEXT NOT NULL,
   repo_name TEXT NOT NULL,
@@ -58,8 +66,7 @@ CREATE TABLE IF NOT EXISTS projects (
   primary_url TEXT,
   generated_config JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (repo_owner, repo_name)
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS project_secrets (
@@ -235,17 +242,36 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_repo_id BIGINT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS app_slug TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS primary_url TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS generated_config JSONB;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_email TEXT;
 
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS target_type TEXT NOT NULL DEFAULT 'ssh_compose';
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_port INTEGER;
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_runtime_dir TEXT;
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_domain TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_projects_owner_email
+  ON projects (owner_email);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'projects_repo_owner_repo_name_key'
+  ) THEN
+    ALTER TABLE projects DROP CONSTRAINT projects_repo_owner_repo_name_key;
+  END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_owner_repo_name_unique
+  ON projects (owner_email, repo_owner, repo_name);
 `;
 
 type JsonRecord = Record<string, unknown>;
 
 interface ProjectRow {
   id: string;
+  owner_email: string | null;
   name: string;
   repo_owner: string;
   repo_name: string;
@@ -358,6 +384,13 @@ interface GitHubOAuthConnectionRow {
   updated_at: string;
 }
 
+interface UserRow {
+  email: string;
+  password_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface AuditLogRow {
   id: number;
   actor: string;
@@ -385,7 +418,15 @@ export interface GitHubOAuthConnectionRecord extends GitHubConnectedAccount {
   encryptedAccessToken: string;
 }
 
+export interface UserRecord {
+  email: string;
+  passwordHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CreateProjectInput {
+  ownerEmail?: string | null;
   name: string;
   repoOwner: string;
   repoName: string;
@@ -465,7 +506,75 @@ export class AutoOpsDb {
     return true;
   }
 
-  async listProjects(): Promise<ProjectSummary[]> {
+  async createUser(input: {
+    email: string;
+    passwordHash: string;
+  }): Promise<UserRecord> {
+    const result = await this.pool.query<UserRow>(
+      `
+        INSERT INTO users (email, password_hash)
+        VALUES ($1, $2)
+        RETURNING email, password_hash, created_at, updated_at
+      `,
+      [input.email, input.passwordHash]
+    );
+
+    return mapUserRecord(result.rows[0]);
+  }
+
+  async upsertUserPassword(input: {
+    email: string;
+    passwordHash: string;
+  }): Promise<UserRecord> {
+    const result = await this.pool.query<UserRow>(
+      `
+        INSERT INTO users (email, password_hash)
+        VALUES ($1, $2)
+        ON CONFLICT (email)
+        DO UPDATE SET
+          password_hash = EXCLUDED.password_hash,
+          updated_at = NOW()
+        RETURNING email, password_hash, created_at, updated_at
+      `,
+      [input.email, input.passwordHash]
+    );
+
+    return mapUserRecord(result.rows[0]);
+  }
+
+  async getUserByEmail(email: string): Promise<UserRecord | null> {
+    const result = await this.pool.query<UserRow>(
+      `
+        SELECT email, password_hash, created_at, updated_at
+        FROM users
+        WHERE email = $1
+      `,
+      [email]
+    );
+
+    return result.rows[0] ? mapUserRecord(result.rows[0]) : null;
+  }
+
+  async claimUnownedProjects(ownerEmail: string): Promise<number> {
+    const result = await this.pool.query<{ count: string }>(
+      `
+        WITH claimed AS (
+          UPDATE projects
+          SET owner_email = $1,
+              updated_at = NOW()
+          WHERE owner_email IS NULL OR owner_email = ''
+          RETURNING id
+        )
+        SELECT COUNT(*)::text AS count
+        FROM claimed
+      `,
+      [ownerEmail]
+    );
+
+    return Number(result.rows[0]?.count ?? "0");
+  }
+
+  async listProjects(ownerEmail?: string): Promise<ProjectSummary[]> {
     const result = await this.pool.query<ProjectRow>(`
       SELECT
         p.*,
@@ -484,12 +593,13 @@ export class AutoOpsDb {
         ORDER BY queued_at DESC
         LIMIT 1
       ) latest_runs ON TRUE
+      ${ownerEmail ? "WHERE p.owner_email = $1" : ""}
       ORDER BY p.created_at DESC
-    `);
+    `, ownerEmail ? [ownerEmail] : []);
     return result.rows.map(mapProjectSummary);
   }
 
-  async getProject(projectId: string): Promise<ProjectSummary | null> {
+  async getProject(projectId: string, ownerEmail?: string): Promise<ProjectSummary | null> {
     const result = await this.pool.query<ProjectRow>(
       `
         SELECT
@@ -510,13 +620,18 @@ export class AutoOpsDb {
           LIMIT 1
         ) latest_runs ON TRUE
         WHERE p.id = $1
+          ${ownerEmail ? "AND p.owner_email = $2" : ""}
       `,
-      [projectId]
+      ownerEmail ? [projectId, ownerEmail] : [projectId]
     );
     return result.rows[0] ? mapProjectSummary(result.rows[0]) : null;
   }
 
-  async getProjectByRepo(owner: string, repo: string): Promise<ProjectSummary | null> {
+  async getProjectByRepo(
+    owner: string,
+    repo: string,
+    ownerEmail?: string
+  ): Promise<ProjectSummary | null> {
     const result = await this.pool.query<ProjectRow>(
       `
         SELECT
@@ -537,21 +652,52 @@ export class AutoOpsDb {
           LIMIT 1
         ) latest_runs ON TRUE
         WHERE p.repo_owner = $1 AND p.repo_name = $2
+          ${ownerEmail ? "AND p.owner_email = $3" : ""}
+        ORDER BY p.created_at DESC
       `,
-      [owner, repo]
+      ownerEmail ? [owner, repo, ownerEmail] : [owner, repo]
     );
     return result.rows[0] ? mapProjectSummary(result.rows[0]) : null;
   }
 
-  async getProjectDetail(projectId: string): Promise<ProjectDetail | null> {
-    const project = await this.getProject(projectId);
+  async listProjectsByRepo(owner: string, repo: string): Promise<ProjectSummary[]> {
+    const result = await this.pool.query<ProjectRow>(
+      `
+        SELECT
+          p.*,
+          COALESCE(target_counts.target_count, 0) AS target_count,
+          latest_runs.status AS latest_run_status
+        FROM projects p
+        LEFT JOIN (
+          SELECT project_id, COUNT(*)::int AS target_count
+          FROM deployment_targets
+          GROUP BY project_id
+        ) target_counts ON target_counts.project_id = p.id
+        LEFT JOIN LATERAL (
+          SELECT status
+          FROM pipeline_runs
+          WHERE project_id = p.id
+          ORDER BY queued_at DESC
+          LIMIT 1
+        ) latest_runs ON TRUE
+        WHERE p.repo_owner = $1 AND p.repo_name = $2
+        ORDER BY p.created_at DESC
+      `,
+      [owner, repo]
+    );
+
+    return result.rows.map(mapProjectSummary);
+  }
+
+  async getProjectDetail(projectId: string, ownerEmail?: string): Promise<ProjectDetail | null> {
+    const project = await this.getProject(projectId, ownerEmail);
     if (!project) {
       return null;
     }
 
     const [recentRuns, deploymentTargets, installation, repository, secrets] = await Promise.all([
-      this.listRuns({ projectId, limit: 10 }),
-      this.listDeploymentTargets(projectId),
+      this.listRuns({ projectId, limit: 10 }, ownerEmail),
+      this.listDeploymentTargets(projectId, ownerEmail),
       this.getGitHubInstallation(project.installationId),
       project.githubRepoId !== null
         ? this.getGitHubRepository(project.installationId, project.githubRepoId)
@@ -575,6 +721,7 @@ export class AutoOpsDb {
       `
         INSERT INTO projects (
           id,
+          owner_email,
           name,
           repo_owner,
           repo_name,
@@ -586,10 +733,11 @@ export class AutoOpsDb {
           app_slug,
           primary_url,
           generated_config
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
       `,
       [
         id,
+        input.ownerEmail ?? null,
         input.name,
         input.repoOwner,
         input.repoName,
@@ -612,7 +760,7 @@ export class AutoOpsDb {
       repoOwner: input.repoOwner,
       repoName: input.repoName
     });
-    const created = await this.getProject(id);
+    const created = await this.getProject(id, input.ownerEmail ?? undefined);
     if (!created) {
       throw new Error("Failed to load created project.");
     }
@@ -621,8 +769,16 @@ export class AutoOpsDb {
 
   async updateProject(
     projectId: string,
-    input: ProjectUpdateInput
+    input: ProjectUpdateInput,
+    ownerEmail?: string
   ): Promise<ProjectSummary | null> {
+    if (ownerEmail) {
+      const existingProject = await this.getProject(projectId, ownerEmail);
+      if (!existingProject) {
+        return null;
+      }
+    }
+
     const updates: string[] = [];
     const values: unknown[] = [];
 
@@ -641,12 +797,19 @@ export class AutoOpsDb {
 
     if (updates.length > 0) {
       values.push(projectId);
+      const ownerClause = ownerEmail
+        ? ` AND owner_email = $${values.length + 1}`
+        : "";
+      if (ownerEmail) {
+        values.push(ownerEmail);
+      }
       await this.pool.query(
         `
           UPDATE projects
           SET ${updates.join(", ")},
               updated_at = NOW()
-          WHERE id = $${values.length}
+          WHERE id = $${values.length - (ownerEmail ? 1 : 0)}
+          ${ownerClause}
         `,
         values
       );
@@ -662,12 +825,13 @@ export class AutoOpsDb {
           UPDATE projects
           SET updated_at = NOW()
           WHERE id = $1
+          ${ownerEmail ? "AND owner_email = $2" : ""}
         `,
-        [projectId]
+        ownerEmail ? [projectId, ownerEmail] : [projectId]
       );
     }
 
-    return this.getProject(projectId);
+    return this.getProject(projectId, ownerEmail);
   }
 
   async upsertProjectSecret(
@@ -1211,7 +1375,10 @@ export class AutoOpsDb {
     );
   }
 
-  async listRuns(filters: RunListFilters = {}): Promise<PipelineRunSummary[]> {
+  async listRuns(
+    filters: RunListFilters = {},
+    ownerEmail?: string
+  ): Promise<PipelineRunSummary[]> {
     const values: unknown[] = [];
     const clauses: string[] = [];
     const {
@@ -1245,6 +1412,10 @@ export class AutoOpsDb {
         )
       `);
     }
+    if (ownerEmail) {
+      values.push(ownerEmail);
+      clauses.push(`p.owner_email = $${values.length}`);
+    }
 
     values.push(limit);
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -1277,7 +1448,7 @@ export class AutoOpsDb {
     return result.rows.map(mapRunSummary);
   }
 
-  async getRun(runId: string): Promise<{
+  async getRun(runId: string, ownerEmail?: string): Promise<{
     summary: PipelineRunSummary;
     pipelineConfig: PipelineConfig | null;
     metadata: QueuedRunMetadata;
@@ -1302,8 +1473,9 @@ export class AutoOpsDb {
         FROM pipeline_runs r
         INNER JOIN projects p ON p.id = r.project_id
         WHERE r.id = $1
+          ${ownerEmail ? "AND p.owner_email = $2" : ""}
       `,
-      [runId]
+      ownerEmail ? [runId, ownerEmail] : [runId]
     );
     const row = result.rows[0];
     if (!row) {
@@ -1316,7 +1488,10 @@ export class AutoOpsDb {
     };
   }
 
-  async listRunsByIds(runIds: string[]): Promise<PipelineRunSummary[]> {
+  async listRunsByIds(
+    runIds: string[],
+    ownerEmail?: string
+  ): Promise<PipelineRunSummary[]> {
     if (runIds.length === 0) {
       return [];
     }
@@ -1341,19 +1516,20 @@ export class AutoOpsDb {
         FROM pipeline_runs r
         INNER JOIN projects p ON p.id = r.project_id
         WHERE r.id = ANY($1::text[])
+          ${ownerEmail ? "AND p.owner_email = $2" : ""}
         ORDER BY r.queued_at DESC
       `,
-      [runIds]
+      ownerEmail ? [runIds, ownerEmail] : [runIds]
     );
 
     return result.rows.map(mapRunSummary);
   }
 
-  async getRunDetail(runId: string): Promise<{
+  async getRunDetail(runId: string, ownerEmail?: string): Promise<{
     run: PipelineRunSummary;
     stages: StageRun[];
   } | null> {
-    const run = await this.getRun(runId);
+    const run = await this.getRun(runId, ownerEmail);
     if (!run) {
       return null;
     }
@@ -1390,7 +1566,11 @@ export class AutoOpsDb {
     };
   }
 
-  async listRunLogs(runId: string, afterId = 0): Promise<RunLogEntry[]> {
+  async listRunLogs(
+    runId: string,
+    afterId = 0,
+    ownerEmail?: string
+  ): Promise<RunLogEntry[]> {
     const result = await this.pool.query<{
       id: number;
       run_id: string;
@@ -1399,12 +1579,16 @@ export class AutoOpsDb {
       created_at: string;
     }>(
       `
-        SELECT id, run_id, stage_name, message, created_at
-        FROM run_logs
-        WHERE run_id = $1 AND id > $2
-        ORDER BY id ASC
+        SELECT l.id, l.run_id, l.stage_name, l.message, l.created_at
+        FROM run_logs l
+        INNER JOIN pipeline_runs r ON r.id = l.run_id
+        INNER JOIN projects p ON p.id = r.project_id
+        WHERE l.run_id = $1
+          AND l.id > $2
+          ${ownerEmail ? "AND p.owner_email = $3" : ""}
+        ORDER BY l.id ASC
       `,
-      [runId, afterId]
+      ownerEmail ? [runId, afterId, ownerEmail] : [runId, afterId]
     );
     return result.rows.map((row) => ({
       id: Number(row.id),
@@ -1664,12 +1848,21 @@ export class AutoOpsDb {
     return this.listDeploymentTargets(projectId);
   }
 
-  async listDeploymentTargets(projectId?: string): Promise<DeploymentTargetSummary[]> {
+  async listDeploymentTargets(
+    projectId?: string,
+    ownerEmail?: string
+  ): Promise<DeploymentTargetSummary[]> {
     const values: unknown[] = [];
-    const where = projectId ? "WHERE t.project_id = $1" : "";
+    const clauses: string[] = [];
     if (projectId) {
       values.push(projectId);
+      clauses.push(`t.project_id = $${values.length}`);
     }
+    if (ownerEmail) {
+      values.push(ownerEmail);
+      clauses.push(`p.owner_email = $${values.length}`);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const result = await this.pool.query<DeploymentTargetRow>(
       `
         SELECT
@@ -1699,7 +1892,10 @@ export class AutoOpsDb {
     return result.rows.map(mapDeploymentTargetSummary);
   }
 
-  async getDeploymentTargetById(targetId: string): Promise<DeploymentTargetSummary | null> {
+  async getDeploymentTargetById(
+    targetId: string,
+    ownerEmail?: string
+  ): Promise<DeploymentTargetSummary | null> {
     const result = await this.pool.query<DeploymentTargetRow>(
       `
         SELECT
@@ -1722,8 +1918,9 @@ export class AutoOpsDb {
         FROM deployment_targets t
         INNER JOIN projects p ON p.id = t.project_id
         WHERE t.id = $1
+          ${ownerEmail ? "AND p.owner_email = $2" : ""}
       `,
-      [targetId]
+      ownerEmail ? [targetId, ownerEmail] : [targetId]
     );
     return result.rows[0] ? mapDeploymentTargetSummary(result.rows[0]) : null;
   }
@@ -1824,7 +2021,10 @@ export class AutoOpsDb {
     return result.rows[0] ? mapDeploymentRevisionSummary(result.rows[0]) : null;
   }
 
-  async listDeploymentRevisions(limit = 100): Promise<DeploymentRevisionSummary[]> {
+  async listDeploymentRevisions(
+    limit = 100,
+    ownerEmail?: string
+  ): Promise<DeploymentRevisionSummary[]> {
     const result = await this.pool.query<DeploymentRevisionRow>(
       `
         SELECT
@@ -1842,15 +2042,19 @@ export class AutoOpsDb {
         FROM deployment_revisions r
         INNER JOIN deployment_targets t ON t.id = r.target_id
         INNER JOIN projects p ON p.id = t.project_id
+        ${ownerEmail ? "WHERE p.owner_email = $2" : ""}
         ORDER BY r.deployed_at DESC
         LIMIT $1
       `,
-      [limit]
+      ownerEmail ? [limit, ownerEmail] : [limit]
     );
     return result.rows.map(mapDeploymentRevisionSummary);
   }
 
-  async listTargetRevisions(targetId: string): Promise<DeploymentRevisionSummary[]> {
+  async listTargetRevisions(
+    targetId: string,
+    ownerEmail?: string
+  ): Promise<DeploymentRevisionSummary[]> {
     const result = await this.pool.query<DeploymentRevisionRow>(
       `
         SELECT
@@ -1869,22 +2073,24 @@ export class AutoOpsDb {
         INNER JOIN deployment_targets t ON t.id = r.target_id
         INNER JOIN projects p ON p.id = t.project_id
         WHERE r.target_id = $1
+          ${ownerEmail ? "AND p.owner_email = $2" : ""}
         ORDER BY r.deployed_at DESC
       `,
-      [targetId]
+      ownerEmail ? [targetId, ownerEmail] : [targetId]
     );
     return result.rows.map(mapDeploymentRevisionSummary);
   }
 
   async getDeploymentTargetDetail(
-    targetId: string
+    targetId: string,
+    ownerEmail?: string
   ): Promise<DeploymentTargetDetail | null> {
-    const target = await this.getDeploymentTargetById(targetId);
+    const target = await this.getDeploymentTargetById(targetId, ownerEmail);
     if (!target) {
       return null;
     }
 
-    const revisions = await this.listTargetRevisions(targetId);
+    const revisions = await this.listTargetRevisions(targetId, ownerEmail);
     const linkedRunIds = [...new Set(revisions.flatMap((revision) => (
       revision.runId ? [revision.runId] : []
     )))];
@@ -1892,8 +2098,8 @@ export class AutoOpsDb {
       this.listRuns({
         projectId: target.projectId,
         limit: 25
-      }),
-      this.listRunsByIds(linkedRunIds)
+      }, ownerEmail),
+      this.listRunsByIds(linkedRunIds, ownerEmail)
     ]);
     const runById = new Map<string, PipelineRunSummary>();
 
@@ -1916,7 +2122,7 @@ export class AutoOpsDb {
     limit?: number;
     kind?: "audit" | "webhook";
     status?: string;
-  } = {}): Promise<ActivityEvent[]> {
+  } = {}, ownerEmail?: string): Promise<ActivityEvent[]> {
     const limit = input.limit ?? 50;
     const [auditRows, webhookRows] = await Promise.all([
       input.kind === "webhook"
@@ -1925,10 +2131,43 @@ export class AutoOpsDb {
             `
               SELECT id, actor, action, entity_type, entity_id, metadata, created_at
               FROM audit_logs
+              ${
+                ownerEmail
+                  ? `
+              WHERE actor = $2
+                 OR (
+                   entity_type = 'project'
+                   AND entity_id IN (
+                     SELECT id
+                     FROM projects
+                     WHERE owner_email = $2
+                   )
+                 )
+                 OR (
+                   entity_type = 'run'
+                   AND entity_id IN (
+                     SELECT r.id
+                     FROM pipeline_runs r
+                     INNER JOIN projects p ON p.id = r.project_id
+                     WHERE p.owner_email = $2
+                   )
+                 )
+                 OR (
+                   entity_type = 'deployment_target'
+                   AND entity_id IN (
+                     SELECT t.id
+                     FROM deployment_targets t
+                     INNER JOIN projects p ON p.id = t.project_id
+                     WHERE p.owner_email = $2
+                   )
+                 )
+                  `
+                  : ""
+              }
               ORDER BY created_at DESC
               LIMIT $1
             `,
-            [limit]
+            ownerEmail ? [limit, ownerEmail] : [limit]
           ).then((result) => result.rows),
       input.kind === "audit"
         ? Promise.resolve<WebhookActivityRow[]>([])
@@ -1945,13 +2184,18 @@ export class AutoOpsDb {
                 w.payload -> 'repository' ->> 'name' AS repo_name,
                 p.id AS project_id
               FROM webhook_deliveries w
-              LEFT JOIN projects p
+              ${
+                ownerEmail
+                  ? "INNER JOIN projects p"
+                  : "LEFT JOIN projects p"
+              }
                 ON p.repo_owner = w.payload -> 'repository' -> 'owner' ->> 'login'
                AND p.repo_name = w.payload -> 'repository' ->> 'name'
+               ${ownerEmail ? "AND p.owner_email = $2" : ""}
               ORDER BY w.created_at DESC
               LIMIT $1
             `,
-            [limit]
+            ownerEmail ? [limit, ownerEmail] : [limit]
           ).then((result) => result.rows)
     ]);
 
@@ -1968,7 +2212,7 @@ export class AutoOpsDb {
     return events;
   }
 
-  async getDashboardOverview(): Promise<DashboardOverview> {
+  async getDashboardOverview(ownerEmail?: string): Promise<DashboardOverview> {
     const [
       projectCountResult,
       queuedRunCountResult,
@@ -1981,12 +2225,33 @@ export class AutoOpsDb {
       latestFailedRun,
       deploymentTargets
     ] = await Promise.all([
-      this.pool.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM projects"),
       this.pool.query<{ count: string }>(
-        "SELECT COUNT(*)::text AS count FROM pipeline_runs WHERE status = 'queued'"
+        `
+          SELECT COUNT(*)::text AS count
+          FROM projects
+          ${ownerEmail ? "WHERE owner_email = $1" : ""}
+        `,
+        ownerEmail ? [ownerEmail] : []
       ),
       this.pool.query<{ count: string }>(
-        "SELECT COUNT(*)::text AS count FROM pipeline_runs WHERE status = 'running'"
+        `
+          SELECT COUNT(*)::text AS count
+          FROM pipeline_runs r
+          INNER JOIN projects p ON p.id = r.project_id
+          WHERE r.status = 'queued'
+          ${ownerEmail ? "AND p.owner_email = $1" : ""}
+        `,
+        ownerEmail ? [ownerEmail] : []
+      ),
+      this.pool.query<{ count: string }>(
+        `
+          SELECT COUNT(*)::text AS count
+          FROM pipeline_runs r
+          INNER JOIN projects p ON p.id = r.project_id
+          WHERE r.status = 'running'
+          ${ownerEmail ? "AND p.owner_email = $1" : ""}
+        `,
+        ownerEmail ? [ownerEmail] : []
       ),
       this.pool.query<{ total: string; succeeded: string }>(
         `
@@ -1997,16 +2262,20 @@ export class AutoOpsDb {
             COUNT(*) FILTER (
               WHERE status = 'succeeded'
             )::text AS succeeded
-          FROM pipeline_runs
+          FROM pipeline_runs r
+          INNER JOIN projects p ON p.id = r.project_id
           WHERE queued_at >= NOW() - INTERVAL '7 days'
+          ${ownerEmail ? "AND p.owner_email = $1" : ""}
         `
+        ,
+        ownerEmail ? [ownerEmail] : []
       ),
-      this.listRuns({ limit: 8 }),
-      this.listDeploymentRevisions(6),
-      this.listActivityEvents({ limit: 8 }),
-      this.listRuns({ status: "running", limit: 5 }),
-      this.listRuns({ status: "failed", limit: 1 }),
-      this.listDeploymentTargets()
+      this.listRuns({ limit: 8 }, ownerEmail),
+      this.listDeploymentRevisions(6, ownerEmail),
+      this.listActivityEvents({ limit: 8 }, ownerEmail),
+      this.listRuns({ status: "running", limit: 5 }, ownerEmail),
+      this.listRuns({ status: "failed", limit: 1 }, ownerEmail),
+      this.listDeploymentTargets(undefined, ownerEmail)
     ]);
 
     const allUnhealthyTargets = deploymentTargets.filter(
@@ -2086,8 +2355,11 @@ export class AutoOpsDb {
     );
   }
 
-  async enqueueRollbackRun(input: RollbackRequest): Promise<PipelineRunSummary> {
-    const target = await this.getDeploymentTargetById(input.targetId);
+  async enqueueRollbackRun(
+    input: RollbackRequest,
+    ownerEmail?: string
+  ): Promise<PipelineRunSummary> {
+    const target = await this.getDeploymentTargetById(input.targetId, ownerEmail);
     if (!target) {
       throw new Error("Deployment target not found.");
     }
@@ -2107,8 +2379,12 @@ export class AutoOpsDb {
     });
   }
 
-  async rerun(runId: string, triggeredBy: string): Promise<PipelineRunSummary> {
-    const existing = await this.getRun(runId);
+  async rerun(
+    runId: string,
+    triggeredBy: string,
+    ownerEmail?: string
+  ): Promise<PipelineRunSummary> {
+    const existing = await this.getRun(runId, ownerEmail);
     if (!existing) {
       throw new Error("Run not found.");
     }
@@ -2138,6 +2414,15 @@ export class AutoOpsDb {
       [actor, action, entityType, entityId, JSON.stringify(metadata)]
     );
   }
+}
+
+function mapUserRecord(row: UserRow): UserRecord {
+  return {
+    email: row.email,
+    passwordHash: row.password_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
 }
 
 function mapProjectSummary(row: ProjectRow): ProjectSummary {

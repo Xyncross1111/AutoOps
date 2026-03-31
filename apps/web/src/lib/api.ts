@@ -97,6 +97,13 @@ export function login(email: string, password: string) {
   });
 }
 
+export function register(email: string, password: string) {
+  return fetchJson<LoginResponse>("/api/auth/register", undefined, {
+    method: "POST",
+    body: JSON.stringify({ email, password })
+  });
+}
+
 export function getAuthMe(token: string) {
   return fetchJson<{ user: { email: string } }>("/api/auth/me", token);
 }

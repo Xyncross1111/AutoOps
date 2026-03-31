@@ -46,6 +46,20 @@ function createDbMock() {
 
   return {
     healthcheck: vi.fn().mockResolvedValue(true),
+    createUser: vi.fn().mockImplementation(async ({ email }: { email: string }) => ({
+      email,
+      passwordHash: "hashed-password",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    })),
+    upsertUserPassword: vi.fn().mockImplementation(async ({ email }: { email: string }) => ({
+      email,
+      passwordHash: "hashed-password",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    })),
+    getUserByEmail: vi.fn().mockResolvedValue(null),
+    claimUnownedProjects: vi.fn().mockResolvedValue(0),
     getDashboardOverview: vi.fn().mockResolvedValue({
       metrics: {
         projectCount: 1,
@@ -117,6 +131,7 @@ function createDbMock() {
     createProject: vi.fn().mockResolvedValue(baseProject),
     writeAuditLog: vi.fn().mockResolvedValue(undefined),
     listProjects: vi.fn().mockResolvedValue([]),
+    listProjectsByRepo: vi.fn().mockResolvedValue([baseProject]),
     getProject: vi.fn().mockResolvedValue(baseProject),
     getProjectByRepo: vi.fn().mockResolvedValue(baseProject),
     getProjectDetail: vi.fn().mockResolvedValue({
@@ -266,6 +281,32 @@ describe("createApp", () => {
     vi.clearAllMocks();
   });
 
+  it("registers a new user and returns a token", async () => {
+    const db = createDbMock();
+    db.getUserByEmail.mockResolvedValue(null);
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+
+    const response = await request(app)
+      .post("/api/auth/register")
+      .send({
+        email: "operator@example.com",
+        password: "strong-password"
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body.user.email).toBe("operator@example.com");
+    expect(response.body.token).toEqual(expect.any(String));
+    expect(db.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "operator@example.com"
+      })
+    );
+  });
+
   it("returns the dashboard overview payload", async () => {
     const db = createDbMock();
     const app = createApp({
@@ -281,7 +322,7 @@ describe("createApp", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.overview.metrics.projectCount).toBe(1);
-    expect(db.getDashboardOverview).toHaveBeenCalledTimes(1);
+    expect(db.getDashboardOverview).toHaveBeenCalledWith(config.ADMIN_EMAIL);
   });
 
   it("returns a GitHub OAuth authorization URL and stores the connected account", async () => {
@@ -389,7 +430,7 @@ describe("createApp", () => {
       source: "push",
       search: "main",
       limit: 25
-    });
+    }, config.ADMIN_EMAIL);
   });
 
   it("returns project detail and supports patch updates with secret upserts", async () => {
@@ -429,6 +470,7 @@ describe("createApp", () => {
       configPath: ".autoops/pipeline.yml"
     });
     expect(db.updateProject.mock.calls[0][1].secrets.ghcr_token).not.toBe("super-secret");
+    expect(db.updateProject.mock.calls[0][2]).toBe(config.ADMIN_EMAIL);
   });
 
   it("returns deployment target detail", async () => {
@@ -446,7 +488,7 @@ describe("createApp", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.target.id).toBe("target-1");
-    expect(db.getDeploymentTargetDetail).toHaveBeenCalledWith("target-1");
+    expect(db.getDeploymentTargetDetail).toHaveBeenCalledWith("target-1", config.ADMIN_EMAIL);
   });
 
   it("returns normalized activity events", async () => {
@@ -469,7 +511,7 @@ describe("createApp", () => {
       limit: 10,
       kind: "audit",
       status: "completed"
-    });
+    }, config.ADMIN_EMAIL);
   });
 
   it("syncs installation repositories and stores analysis results", async () => {
