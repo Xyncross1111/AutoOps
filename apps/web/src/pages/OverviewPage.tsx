@@ -92,9 +92,9 @@ export function OverviewPage() {
             </p>
           </div>
           <div className="hero-actions">
-            <Link className="button-link" to="/projects/new">
+            <Link className="button-link" to="/repositories">
               <FolderPlus size={16} />
-              <span>Register Project</span>
+              <span>Connect GitHub</span>
             </Link>
             <Link className="button-link secondary" to="/runs">
               <Workflow size={16} />

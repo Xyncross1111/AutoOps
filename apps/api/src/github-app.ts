@@ -12,6 +12,18 @@ interface FetchFileArgs {
   ref: string;
 }
 
+export interface GitHubInstallationRepository {
+  repoId: number;
+  owner: string;
+  name: string;
+  fullName: string;
+  defaultBranch: string;
+  isPrivate: boolean;
+  isArchived: boolean;
+  htmlUrl: string;
+  pushedAt: string | null;
+}
+
 export class GitHubAppService {
   private app: App | null;
 
@@ -72,5 +84,82 @@ export class GitHubAppService {
     return typeof response.data === "string"
       ? response.data
       : JSON.stringify(response.data);
+  }
+
+  async fetchRepositoryFileOptional(args: FetchFileArgs): Promise<string | null> {
+    try {
+      return await this.fetchRepositoryFile(args);
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "status" in error &&
+        Number((error as { status?: unknown }).status) === 404
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async listInstallationRepositories(
+    installationId: number
+  ): Promise<GitHubInstallationRepository[]> {
+    if (!this.app) {
+      throw new Error("GitHub App credentials are not configured.");
+    }
+
+    const octokit = await this.app.getInstallationOctokit(installationId);
+    const repositories: GitHubInstallationRepository[] = [];
+    let page = 1;
+
+    while (true) {
+      const response = await octokit.request("GET /installation/repositories", {
+        per_page: 100,
+        page
+      });
+
+      for (const repository of response.data.repositories) {
+        repositories.push({
+          repoId: repository.id,
+          owner: repository.owner.login,
+          name: repository.name,
+          fullName: repository.full_name,
+          defaultBranch: repository.default_branch,
+          isPrivate: repository.private,
+          isArchived: repository.archived,
+          htmlUrl: repository.html_url,
+          pushedAt: repository.pushed_at
+        });
+      }
+
+      if (response.data.repositories.length < 100) {
+        break;
+      }
+
+      page += 1;
+    }
+
+    return repositories;
+  }
+
+  async getBranchHeadSha(args: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    branch: string;
+  }): Promise<string> {
+    if (!this.app) {
+      throw new Error("GitHub App credentials are not configured.");
+    }
+
+    const octokit = await this.app.getInstallationOctokit(args.installationId);
+    const response = await octokit.request("GET /repos/{owner}/{repo}/branches/{branch}", {
+      owner: args.owner,
+      repo: args.repo,
+      branch: args.branch
+    });
+
+    return response.data.commit.sha;
   }
 }

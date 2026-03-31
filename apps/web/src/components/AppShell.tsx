@@ -23,13 +23,17 @@ const pageMeta: Record<string, { title: string; subtitle: string }> = {
     title: "Deployments",
     subtitle: "Monitor target health, revision history, and rollback readiness."
   },
+  "/repositories": {
+    title: "Repositories",
+    subtitle: "Connect GitHub, sync installations, and review which repos AutoOps can manage."
+  },
   "/projects": {
     title: "Projects",
     subtitle: "Manage connected repositories, deployment targets, and setup posture."
   },
   "/projects/new": {
-    title: "Register Project",
-    subtitle: "Guide a repository from GitHub installation to AutoOps management."
+    title: "Repositories",
+    subtitle: "Connect GitHub, sync installations, and review which repos AutoOps can manage."
   },
   "/activity": {
     title: "Activity",
@@ -41,6 +45,7 @@ const navItems = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/runs", label: "Runs", icon: Workflow },
   { to: "/deployments", label: "Deployments", icon: Rocket },
+  { to: "/repositories", label: "Repositories", icon: FolderGit2 },
   { to: "/projects", label: "Projects", icon: FolderGit2 },
   { to: "/activity", label: "Activity", icon: Activity }
 ];
@@ -86,9 +91,9 @@ export function AppShell(props: {
           })}
         </nav>
 
-        <NavLink to="/projects/new" className="sidebar-cta">
+        <NavLink to="/repositories" className="sidebar-cta">
           <PlusCircle size={18} />
-          <span>New Project</span>
+          <span>Connect GitHub</span>
         </NavLink>
 
         <div className="sidebar-footer">

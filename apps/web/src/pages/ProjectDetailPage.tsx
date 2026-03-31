@@ -1,12 +1,12 @@
 import { FormEvent, type ReactNode, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { KeyRound, Settings2 } from "lucide-react";
+import { ExternalLink, KeyRound, Rocket, Settings2 } from "lucide-react";
 import type { ProjectDetail } from "@autoops/core";
 
 import { useAppSession } from "../app-context";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState, InlineError, LoadingBlock } from "../components/States";
-import { getProject, updateProject } from "../lib/api";
+import { deployManagedProject, getProject, updateProject } from "../lib/api";
 import { formatDateTime, formatRelativeTime, shortSha } from "../lib/format";
 
 export function ProjectDetailPage() {
@@ -22,6 +22,7 @@ export function ProjectDetailPage() {
   });
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isDeploying, setIsDeploying] = useState(false);
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
@@ -62,6 +63,9 @@ export function ProjectDetailPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!detail) {
+      return;
+    }
     setIsSaving(true);
     setError("");
     setSuccessMessage("");
@@ -70,10 +74,11 @@ export function ProjectDetailPage() {
       await updateProject(token, projectId, {
         name: form.name,
         defaultBranch: form.defaultBranch,
-        configPath: form.configPath,
-        secrets: form.secretName && form.secretValue
-          ? { [form.secretName]: form.secretValue }
-          : undefined
+        configPath: detail.project.mode === "custom_pipeline" ? form.configPath : undefined,
+        secrets:
+          detail.project.mode === "custom_pipeline" && form.secretName && form.secretValue
+            ? { [form.secretName]: form.secretValue }
+            : undefined
       });
       setSuccessMessage("Project settings saved.");
       setForm((current) => ({ ...current, secretName: "", secretValue: "" }));
@@ -82,6 +87,22 @@ export function ProjectDetailPage() {
       setError(caughtError instanceof Error ? caughtError.message : "Failed to save project");
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function handleDeployNow() {
+    setIsDeploying(true);
+    setError("");
+    setSuccessMessage("");
+
+    try {
+      const response = await deployManagedProject(token, projectId);
+      refreshApp();
+      setSuccessMessage(`Deployment queued for ${shortSha(response.run.commitSha)}.`);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Failed to queue deployment");
+    } finally {
+      setIsDeploying(false);
     }
   }
 
@@ -114,7 +135,15 @@ export function ProjectDetailPage() {
               <p className="eyebrow">Repository context</p>
               <h3>{detail.project.name}</h3>
             </div>
-            <Settings2 size={18} />
+            <div className="row-actions">
+              {detail.project.mode === "managed_nextjs" ? (
+                <button type="button" onClick={() => void handleDeployNow()} disabled={isDeploying}>
+                  <Rocket size={16} />
+                  <span>{isDeploying ? "Queueing..." : "Deploy Now"}</span>
+                </button>
+              ) : null}
+              <Settings2 size={18} />
+            </div>
           </div>
 
           <div className="meta-grid">
@@ -122,8 +151,16 @@ export function ProjectDetailPage() {
               label="Repository"
               value={`${detail.project.repoOwner}/${detail.project.repoName}`}
             />
+            <MetaItem label="Project mode" value={detail.project.mode} />
             <MetaItem label="Default branch" value={detail.project.defaultBranch} />
-            <MetaItem label="Config path" value={detail.project.configPath} />
+            <MetaItem
+              label="Config path"
+              value={
+                detail.project.mode === "custom_pipeline"
+                  ? detail.project.configPath
+                  : "Managed by AutoOps"
+              }
+            />
             <MetaItem label="Target count" value={String(detail.project.targetCount)} />
             <MetaItem
               label="Installation"
@@ -133,8 +170,52 @@ export function ProjectDetailPage() {
                   : "Not linked"
               }
             />
+            <MetaItem
+              label="Primary URL"
+              value={
+                detail.project.primaryUrl ? (
+                  <a href={detail.project.primaryUrl} target="_blank" rel="noreferrer">
+                    {detail.project.primaryUrl}
+                  </a>
+                ) : (
+                  "Pending managed edge domain"
+                )
+              }
+            />
             <MetaItem label="Updated" value={formatDateTime(detail.project.updatedAt)} />
           </div>
+
+          {detail.repository ? (
+            <div className="panel-card inset-card">
+              <div className="panel-heading compact">
+                <div>
+                  <p className="eyebrow">Catalog status</p>
+                  <h3>{detail.repository.fullName}</h3>
+                </div>
+                <StatusBadge status={detail.repository.deployabilityStatus} />
+              </div>
+
+              <div className="row-actions">
+                <a
+                  className="button-link subtle-link"
+                  href={detail.repository.htmlUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={16} />
+                  <span>Open Repository</span>
+                </a>
+                <small>
+                  Last synced {formatRelativeTime(detail.repository.syncedAt)}
+                </small>
+              </div>
+
+              <p className="muted-copy">
+                {detail.repository.deployabilityReason ??
+                  "This repository is being managed directly from the synced GitHub catalog."}
+              </p>
+            </div>
+          ) : null}
 
           <form className="detail-stack" onSubmit={handleSubmit}>
             <label>
@@ -156,62 +237,86 @@ export function ProjectDetailPage() {
                 />
               </label>
 
-              <label>
-                <span>Pipeline config path</span>
-                <input
-                  value={form.configPath}
-                  onChange={(event) => (
-                    setForm((current) => ({ ...current, configPath: event.target.value }))
-                  )}
-                />
-              </label>
-            </div>
-
-            <div className="panel-card inset-card">
-              <div className="panel-heading compact">
-                <div>
-                  <p className="eyebrow">Write-only secret update</p>
-                  <h3>Upsert a project secret</h3>
-                </div>
-                <KeyRound size={18} />
-              </div>
-
-              <div className="split-inputs">
+              {detail.project.mode === "custom_pipeline" ? (
                 <label>
-                  <span>Secret name</span>
+                  <span>Pipeline config path</span>
                   <input
-                    value={form.secretName}
+                    value={form.configPath}
                     onChange={(event) => (
-                      setForm((current) => ({ ...current, secretName: event.target.value }))
+                      setForm((current) => ({ ...current, configPath: event.target.value }))
                     )}
-                    placeholder="prod_private_key"
                   />
                 </label>
-
-                <label>
-                  <span>Secret value</span>
-                  <input
-                    value={form.secretValue}
-                    onChange={(event) => (
-                      setForm((current) => ({ ...current, secretValue: event.target.value }))
-                    )}
-                    placeholder="New encrypted value source"
-                  />
-                </label>
-              </div>
-
-              {detail.secretNames.length > 0 ? (
-                <div className="tag-list">
-                  {detail.secretNames.map((name) => (
-                    <span className="tag-chip" key={name}>
-                      {name}
-                    </span>
-                  ))}
-                </div>
               ) : (
-                <p className="muted-copy">No secret names have been stored yet.</p>
+                <label>
+                  <span>Managed deployment recipe</span>
+                  <input value="Generated from GitHub repo analysis" readOnly />
+                </label>
               )}
             </div>
+
+            {detail.project.mode === "custom_pipeline" ? (
+              <div className="panel-card inset-card">
+                <div className="panel-heading compact">
+                  <div>
+                    <p className="eyebrow">Write-only secret update</p>
+                    <h3>Upsert a project secret</h3>
+                  </div>
+                  <KeyRound size={18} />
+                </div>
+
+                <div className="split-inputs">
+                  <label>
+                    <span>Secret name</span>
+                    <input
+                      value={form.secretName}
+                      onChange={(event) => (
+                        setForm((current) => ({ ...current, secretName: event.target.value }))
+                      )}
+                      placeholder="prod_private_key"
+                    />
+                  </label>
+
+                  <label>
+                    <span>Secret value</span>
+                    <input
+                      value={form.secretValue}
+                      onChange={(event) => (
+                        setForm((current) => ({ ...current, secretValue: event.target.value }))
+                      )}
+                      placeholder="New encrypted value source"
+                    />
+                  </label>
+                </div>
+
+                {detail.secretNames.length > 0 ? (
+                  <div className="tag-list">
+                    {detail.secretNames.map((name) => (
+                      <span className="tag-chip" key={name}>
+                        {name}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted-copy">No secret names have been stored yet.</p>
+                )}
+              </div>
+            ) : (
+              <div className="panel-card inset-card">
+                <div className="panel-heading compact">
+                  <div>
+                    <p className="eyebrow">Managed runtime</p>
+                    <h3>AutoOps handles the deploy recipe</h3>
+                  </div>
+                  <Rocket size={18} />
+                </div>
+                <p className="muted-copy">
+                  Imported Next.js projects do not require pipeline files, registry credentials,
+                  or SSH target secrets. Update the branch, then use Deploy Now to roll out the
+                  latest commit.
+                </p>
+              </div>
+            )}
 
             <button type="submit" disabled={isSaving}>
               {isSaving ? "Saving..." : "Save Project Settings"}
@@ -269,7 +374,11 @@ export function ProjectDetailPage() {
                   >
                     <div>
                       <strong>{target.name}</strong>
-                      <p>{target.service}</p>
+                      <p>
+                        {target.targetType === "managed_vps"
+                          ? `Managed VPS • ${target.managedDomain ?? target.managedPort}`
+                          : target.service}
+                      </p>
                     </div>
                     <div className="row-end">
                       <StatusBadge status={target.lastStatus} />

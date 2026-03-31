@@ -52,6 +52,21 @@ export interface ExecutionInfrastructure {
     imageDigest: string;
     onOutput?: (line: string) => Promise<void> | void;
   }): Promise<void>;
+  inspectImageId(args: {
+    imageTag: string;
+  }): Promise<string>;
+  deployManagedTarget(args: {
+    appSlug: string;
+    runtimeDir: string;
+    composeFile: string;
+    service: string;
+    imageTag: string;
+    publicPort: number;
+    networkName: string;
+    managedDomain?: string | null;
+    edgeContainerName?: string | null;
+    onOutput?: (line: string) => Promise<void> | void;
+  }): Promise<void>;
   waitForHealthcheck(args: {
     url: string;
     timeoutSeconds?: number;
@@ -245,6 +260,94 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
     }
   }
 
+  async inspectImageId(args: { imageTag: string }): Promise<string> {
+    const output = await this.exec("docker", ["image", "inspect", args.imageTag, "--format={{.Id}}"]);
+    return output.trim();
+  }
+
+  async deployManagedTarget(args: {
+    appSlug: string;
+    runtimeDir: string;
+    composeFile: string;
+    service: string;
+    imageTag: string;
+    publicPort: number;
+    networkName: string;
+    managedDomain?: string | null;
+    edgeContainerName?: string | null;
+    onOutput?: (line: string) => Promise<void> | void;
+  }): Promise<void> {
+    await mkdir(args.runtimeDir, { recursive: true });
+    await this.ensureDockerNetwork(args.networkName, args.onOutput);
+    await writeFile(
+      args.composeFile,
+      [
+        "services:",
+        `  ${args.service}:`,
+        `    container_name: autoops-${args.appSlug}`,
+        `    image: ${args.imageTag}`,
+        "    restart: unless-stopped",
+        "    environment:",
+        '      NODE_ENV: "production"',
+        '      HOSTNAME: "0.0.0.0"',
+        '      PORT: "3000"',
+        "    ports:",
+        `      - \"${args.publicPort}:3000\"`,
+        "    networks:",
+        `      ${args.networkName}:`,
+        "        aliases:",
+        `          - ${args.appSlug}`,
+        "",
+        "networks:",
+        `  ${args.networkName}:`,
+        "    external: true"
+      ].join("\n"),
+      "utf8"
+    );
+
+    await this.exec(
+      "docker",
+      [
+        "compose",
+        "-p",
+        `autoops-${args.appSlug}`,
+        "-f",
+        args.composeFile,
+        "up",
+        "-d",
+        "--remove-orphans"
+      ],
+      { onOutput: args.onOutput }
+    );
+
+    if (args.managedDomain && args.edgeContainerName) {
+      const sitesDir = join(resolve(args.runtimeDir, "..", ".."), "caddy", "sites");
+      const snippetPath = join(sitesDir, `${args.appSlug}.caddy`);
+      await mkdir(sitesDir, { recursive: true });
+      await writeFile(
+        snippetPath,
+        [
+          `${args.managedDomain} {`,
+          `  reverse_proxy ${args.appSlug}:3000`,
+          "}"
+        ].join("\n"),
+        "utf8"
+      );
+      await this.exec(
+        "docker",
+        [
+          "exec",
+          args.edgeContainerName,
+          "caddy",
+          "reload",
+          "--config",
+          "/etc/caddy/Caddyfile"
+        ],
+        { onOutput: args.onOutput }
+      );
+    }
+  }
+
   async waitForHealthcheck(args: {
     url: string;
     timeoutSeconds?: number;
@@ -269,6 +372,17 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
 
   async cleanupPath(path: string): Promise<void> {
     await rm(path, { recursive: true, force: true });
+  }
+
+  private async ensureDockerNetwork(
+    networkName: string,
+    onOutput?: (line: string) => Promise<void> | void
+  ): Promise<void> {
+    try {
+      await this.exec("docker", ["network", "inspect", networkName], { onOutput });
+    } catch {
+      await this.exec("docker", ["network", "create", networkName], { onOutput });
+    }
   }
 
   private async exec(

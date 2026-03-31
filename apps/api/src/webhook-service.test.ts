@@ -33,6 +33,8 @@ describe("GitHubWebhookService", () => {
       upsertGitHubInstallation: vi.fn().mockResolvedValue(undefined),
       getProjectByRepo: vi.fn().mockResolvedValue({
         id: "project-1",
+        mode: "custom_pipeline",
+        defaultBranch: "main",
         configPath: ".autoops/pipeline.yml"
       }),
       createRun: vi.fn().mockResolvedValue({ id: "run-1" }),
@@ -79,6 +81,8 @@ describe("GitHubWebhookService", () => {
       recordWebhookDelivery: vi.fn().mockResolvedValue(undefined),
       getProjectByRepo: vi.fn().mockResolvedValue({
         id: "project-1",
+        mode: "custom_pipeline",
+        defaultBranch: "main",
         configPath: ".autoops/pipeline.yml"
       }),
       createRun: vi.fn().mockResolvedValue({ id: "run-1" }),
@@ -109,5 +113,53 @@ describe("GitHubWebhookService", () => {
 
     expect(result).toEqual({ status: "ignored" });
     expect(db.createRun).not.toHaveBeenCalled();
+  });
+
+  it("queues managed projects without fetching pipeline.yml", async () => {
+    const db = {
+      hasWebhookDelivery: vi.fn().mockResolvedValue(false),
+      recordWebhookDelivery: vi.fn().mockResolvedValue(undefined),
+      getProjectByRepo: vi.fn().mockResolvedValue({
+        id: "project-1",
+        mode: "managed_nextjs",
+        defaultBranch: "main",
+        configPath: ".autoops/pipeline.yml"
+      }),
+      createRun: vi.fn().mockResolvedValue({ id: "run-managed" }),
+      supersedeQueuedRuns: vi.fn().mockResolvedValue(undefined)
+    };
+    const github = {
+      fetchRepositoryFile: vi.fn()
+    };
+
+    const service = new GitHubWebhookService(db as any, github as any);
+    const result = await service.handle(
+      {
+        deliveryId: "delivery-3",
+        eventName: "push",
+        signature: "sha256=test"
+      },
+      {
+        ref: "refs/heads/main",
+        after: "def456",
+        sender: { login: "anas" },
+        installation: { id: 12 },
+        repository: {
+          name: "demo",
+          owner: { login: "acme" }
+        }
+      }
+    );
+
+    expect(result).toEqual({ status: "processed", runId: "run-managed" });
+    expect(github.fetchRepositoryFile).not.toHaveBeenCalled();
+    expect(db.createRun).toHaveBeenCalledWith({
+      projectId: "project-1",
+      deliveryId: "delivery-3",
+      source: "push",
+      branch: "main",
+      commitSha: "def456",
+      triggeredBy: "anas"
+    });
   });
 });

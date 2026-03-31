@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { encryptSecret } from "@autoops/core";
@@ -42,14 +46,38 @@ const CLAIMED_RUN = {
   repoOwner: "acme",
   repoName: "demo",
   installationId: 12,
+  mode: "custom_pipeline" as const,
+  githubRepoId: null,
   defaultBranch: "main",
   configPath: ".autoops/pipeline.yml",
+  appSlug: null,
+  primaryUrl: null,
+  managedConfig: null,
   branch: "main",
   commitSha: "abcdef1234567890",
   source: "push" as const,
   triggeredBy: "anas",
   pipelineConfig: PIPELINE,
   metadata: {}
+};
+
+const MANAGED_RUN = {
+  ...CLAIMED_RUN,
+  source: "manual_deploy" as const,
+  mode: "managed_nextjs" as const,
+  githubRepoId: 100,
+  appSlug: "acme-demo-100",
+  primaryUrl: "http://localhost:6100",
+  managedConfig: {
+    framework: "nextjs" as const,
+    packageManager: "pnpm" as const,
+    installCommand: "pnpm install --frozen-lockfile",
+    buildCommand: "pnpm build",
+    startCommand: "pnpm start",
+    nodeVersion: "20",
+    outputPort: 3000
+  },
+  pipelineConfig: null
 };
 
 function createDb(overrides: Record<string, unknown> = {}) {
@@ -74,10 +102,14 @@ function createDb(overrides: Record<string, unknown> = {}) {
         projectId: "project-1",
         projectName: "Demo",
         name: "production",
+        targetType: "ssh_compose",
         hostRef: "prod",
         composeFile: "/srv/app/docker-compose.yml",
         service: "app",
         healthcheckUrl: "https://example.com/health",
+        managedPort: null,
+        managedRuntimeDir: null,
+        managedDomain: null,
         lastStatus: null,
         lastDeployedImage: null,
         lastDeployedAt: null,
@@ -87,6 +119,7 @@ function createDb(overrides: Record<string, unknown> = {}) {
     upsertStageRun: vi.fn().mockResolvedValue(undefined),
     createDeploymentRevision: vi.fn().mockResolvedValue(undefined),
     markDeploymentTargetStatus: vi.fn().mockResolvedValue(undefined),
+    listDeploymentTargets: vi.fn().mockResolvedValue([]),
     listTargetRevisions: vi.fn().mockResolvedValue([
       {
         id: "revision-1",
@@ -120,12 +153,27 @@ function createInfra(overrides: Record<string, unknown> = {}) {
       imageRef: "ghcr.io/acme/app",
       imageDigest: "sha256:new"
     }),
+    inspectImageId: vi.fn().mockResolvedValue("sha256:new"),
     deployComposeTarget: vi.fn().mockResolvedValue(undefined),
+    deployManagedTarget: vi.fn().mockResolvedValue(undefined),
     waitForHealthcheck: vi.fn().mockResolvedValue(undefined),
     cleanupPath: vi.fn().mockResolvedValue(undefined),
     ...overrides
   };
 }
+
+const WORKER_CONFIG = {
+  DATABASE_URL: "",
+  SECRET_MASTER_KEY: "master-key-123",
+  GITHUB_APP_ID: 0,
+  GITHUB_PRIVATE_KEY: "",
+  WORKER_POLL_INTERVAL_MS: 1000,
+  RUNNER_TEMP_DIR: "./tmp",
+  MANAGED_APPS_DIR: "/opt/autoops-managed",
+  MANAGED_BASE_DOMAIN: "",
+  MANAGED_EDGE_CONTAINER_NAME: "autoops-caddy",
+  MANAGED_NETWORK_NAME: "autoops-managed"
+};
 
 describe("PipelineWorker", () => {
   it("processes a successful queued run end to end", async () => {
@@ -135,14 +183,7 @@ describe("PipelineWorker", () => {
       db as any,
       { createInstallationToken: vi.fn().mockResolvedValue("installation-token") } as any,
       infra as any,
-      {
-        DATABASE_URL: "",
-        SECRET_MASTER_KEY: "master-key-123",
-        GITHUB_APP_ID: 0,
-        GITHUB_PRIVATE_KEY: "",
-        WORKER_POLL_INTERVAL_MS: 1000,
-        RUNNER_TEMP_DIR: "./tmp"
-      }
+      WORKER_CONFIG
     );
 
     const processed = await worker.processOnce();
@@ -168,14 +209,7 @@ describe("PipelineWorker", () => {
       db as any,
       { createInstallationToken: vi.fn().mockResolvedValue("installation-token") } as any,
       infra as any,
-      {
-        DATABASE_URL: "",
-        SECRET_MASTER_KEY: "master-key-123",
-        GITHUB_APP_ID: 0,
-        GITHUB_PRIVATE_KEY: "",
-        WORKER_POLL_INTERVAL_MS: 1000,
-        RUNNER_TEMP_DIR: "./tmp"
-      }
+      WORKER_CONFIG
     );
 
     await worker.processOnce();
@@ -188,5 +222,57 @@ describe("PipelineWorker", () => {
       "failed",
       expect.stringContaining("deploy failed")
     );
+  });
+
+  it("processes a managed Next.js deployment locally on the VPS", async () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "autoops-managed-test-"));
+    const repoDir = mkdtempSync(join(tmpdir(), "autoops-managed-repo-"));
+
+    try {
+      const db = createDb({
+        claimNextQueuedRun: vi.fn().mockResolvedValue(MANAGED_RUN),
+        listDeploymentTargets: vi.fn().mockResolvedValue([
+          {
+            id: "target-managed",
+            projectId: "project-1",
+            projectName: "Demo",
+            name: "managed-vps",
+            targetType: "managed_vps",
+            hostRef: "managed",
+            composeFile: `${runtimeDir}/docker-compose.yml`,
+            service: "app",
+            healthcheckUrl: "http://acme-demo-100:3000/",
+            managedPort: 6100,
+            managedRuntimeDir: runtimeDir,
+            managedDomain: null,
+            lastStatus: null,
+            lastDeployedImage: null,
+            lastDeployedAt: null,
+            lastError: null
+          }
+        ])
+      });
+      const infra = createInfra({
+        cloneRepository: vi.fn().mockResolvedValue(repoDir)
+      });
+      const worker = new PipelineWorker(
+        db as any,
+        { createInstallationToken: vi.fn().mockResolvedValue("installation-token") } as any,
+        infra as any,
+        WORKER_CONFIG
+      );
+
+      const processed = await worker.processOnce();
+
+      expect(processed).toBe(true);
+      expect(infra.buildImage).toHaveBeenCalledTimes(1);
+      expect(infra.inspectImageId).toHaveBeenCalledTimes(1);
+      expect(infra.deployManagedTarget).toHaveBeenCalledTimes(1);
+      expect(db.createDeploymentRevision).toHaveBeenCalledTimes(1);
+      expect(db.setRunStatus).toHaveBeenCalledWith("run-1", "succeeded");
+    } finally {
+      rmSync(runtimeDir, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 });

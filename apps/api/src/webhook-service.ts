@@ -1,6 +1,6 @@
 import {
-  matchesPushTrigger,
   normalizeGitRef,
+  matchesPushTrigger,
   parsePipelineConfig
 } from "@autoops/core";
 import type { AutoOpsDb } from "@autoops/db";
@@ -114,6 +114,44 @@ export class GitHubWebhookService {
       };
     }
 
+    const branch = normalizeGitRef(ref);
+
+    if (project.mode === "managed_nextjs") {
+      if (branch !== project.defaultBranch) {
+        await this.db.recordWebhookDelivery({
+          deliveryId,
+          eventName,
+          payload,
+          status: "ignored",
+          errorMessage: `Branch ${branch} does not match the managed deployment branch ${project.defaultBranch}.`
+        });
+        return {
+          status: "ignored" as const
+        };
+      }
+
+      const run = await this.db.createRun({
+        projectId: project.id,
+        deliveryId,
+        source: "push",
+        branch,
+        commitSha,
+        triggeredBy
+      });
+      await this.db.supersedeQueuedRuns(project.id, branch, run.id);
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "processed",
+        runId: run.id
+      });
+      return {
+        status: "processed" as const,
+        runId: run.id
+      };
+    }
+
     const configContents = await this.github.fetchRepositoryFile({
       installationId,
       owner: repoOwner,
@@ -139,7 +177,7 @@ export class GitHubWebhookService {
       projectId: project.id,
       deliveryId,
       source: "push",
-      branch: normalizeGitRef(ref),
+      branch,
       commitSha,
       triggeredBy,
       pipelineConfig,
@@ -148,7 +186,7 @@ export class GitHubWebhookService {
         pipelineConfig
       }
     });
-    await this.db.supersedeQueuedRuns(project.id, normalizeGitRef(ref), run.id);
+    await this.db.supersedeQueuedRuns(project.id, branch, run.id);
     await this.db.recordWebhookDelivery({
       deliveryId,
       eventName,

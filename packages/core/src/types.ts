@@ -13,7 +13,31 @@ export type StageStatus =
   | "failed"
   | "skipped";
 
-export type RunSource = "push" | "rerun" | "manual_rollback";
+export type RunSource = "push" | "rerun" | "manual_rollback" | "manual_deploy";
+
+export type ProjectMode = "custom_pipeline" | "managed_nextjs";
+
+export type DeploymentTargetType = "ssh_compose" | "managed_vps";
+
+export type GitHubRepoAnalysisStatus = "pending" | "analyzed" | "failed";
+
+export type GitHubRepoDeployabilityStatus =
+  | "deployable"
+  | "unsupported"
+  | "imported"
+  | "archived";
+
+export type ManagedAppPackageManager = "npm" | "pnpm" | "yarn";
+
+export interface ManagedNextjsConfig {
+  framework: "nextjs";
+  packageManager: ManagedAppPackageManager;
+  installCommand: string;
+  buildCommand: string;
+  startCommand: string;
+  nodeVersion: string;
+  outputPort: number;
+}
 
 export interface PipelineHealthcheck {
   url: string;
@@ -54,8 +78,13 @@ export interface ProjectSummary {
   repoOwner: string;
   repoName: string;
   installationId: number;
+  mode: ProjectMode;
+  githubRepoId: number | null;
   defaultBranch: string;
   configPath: string;
+  appSlug: string | null;
+  primaryUrl: string | null;
+  managedConfig: ManagedNextjsConfig | null;
   createdAt: string;
   updatedAt: string;
   targetCount: number;
@@ -101,10 +130,14 @@ export interface DeploymentTargetSummary {
   projectId: string;
   projectName: string;
   name: string;
+  targetType: DeploymentTargetType;
   hostRef: string;
   composeFile: string;
   service: string;
   healthcheckUrl: string;
+  managedPort: number | null;
+  managedRuntimeDir: string | null;
+  managedDomain: string | null;
   lastStatus: string | null;
   lastDeployedImage: string | null;
   lastDeployedAt: string | null;
@@ -157,7 +190,39 @@ export interface ProjectInstallationSummary {
   installationId: number;
   accountLogin: string;
   accountType: string;
+  repoCount: number;
+  syncStatus: string;
+  lastSyncAt: string | null;
+  lastSyncError: string | null;
   updatedAt: string;
+}
+
+export interface GitHubRepositorySummary {
+  installationId: number;
+  repoId: number;
+  owner: string;
+  name: string;
+  fullName: string;
+  defaultBranch: string;
+  isPrivate: boolean;
+  isArchived: boolean;
+  htmlUrl: string;
+  pushedAt: string | null;
+  analysisStatus: GitHubRepoAnalysisStatus;
+  deployabilityStatus: GitHubRepoDeployabilityStatus;
+  deployabilityReason: string | null;
+  detectedFramework: string | null;
+  packageManager: ManagedAppPackageManager | null;
+  linkedProjectId: string | null;
+  analyzedAt: string | null;
+  syncedAt: string;
+}
+
+export interface GitHubRepositoryFilters {
+  installationId?: number;
+  search?: string;
+  deployable?: boolean;
+  imported?: boolean;
 }
 
 export interface RunListFilters {
@@ -180,6 +245,7 @@ export interface ProjectDetail {
   recentRuns: PipelineRunSummary[];
   deploymentTargets: DeploymentTargetSummary[];
   installation: ProjectInstallationSummary | null;
+  repository: GitHubRepositorySummary | null;
   secretNames: string[];
 }
 

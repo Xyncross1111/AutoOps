@@ -15,10 +15,31 @@ const config = {
   GITHUB_APP_ID: 0,
   GITHUB_APP_SLUG: "",
   GITHUB_PRIVATE_KEY: "",
-  GITHUB_WEBHOOK_SECRET: "webhook-secret"
+  GITHUB_WEBHOOK_SECRET: "webhook-secret",
+  MANAGED_APPS_DIR: "/opt/autoops-managed",
+  MANAGED_BASE_DOMAIN: ""
 } as const;
 
 function createDbMock() {
+  const baseProject = {
+    id: "project-1",
+    name: "Project One",
+    repoOwner: "acme",
+    repoName: "demo",
+    installationId: 1,
+    mode: "custom_pipeline",
+    githubRepoId: null,
+    defaultBranch: "main",
+    configPath: ".autoops/pipeline.yml",
+    appSlug: null,
+    primaryUrl: null,
+    managedConfig: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    targetCount: 0,
+    latestRunStatus: null
+  };
+
   return {
     healthcheck: vi.fn().mockResolvedValue(true),
     getDashboardOverview: vi.fn().mockResolvedValue({
@@ -38,61 +59,98 @@ function createDbMock() {
       recentDeployments: [],
       recentActivity: []
     }),
-    listGitHubInstallations: vi.fn().mockResolvedValue([]),
-    upsertGitHubInstallation: vi.fn().mockResolvedValue(undefined),
-    createProject: vi.fn().mockResolvedValue({
-      id: "project-1",
-      name: "Project One",
-      repoOwner: "acme",
-      repoName: "demo",
+    listGitHubInstallations: vi.fn().mockResolvedValue([
+      {
+        installationId: 1,
+        accountLogin: "acme",
+        accountType: "Organization",
+        repoCount: 1,
+        syncStatus: "succeeded",
+        lastSyncAt: new Date().toISOString(),
+        lastSyncError: null,
+        updatedAt: new Date().toISOString()
+      }
+    ]),
+    getGitHubInstallation: vi.fn().mockResolvedValue({
       installationId: 1,
-      defaultBranch: "main",
-      configPath: ".autoops/pipeline.yml",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      targetCount: 0,
-      latestRunStatus: null
+      accountLogin: "acme",
+      accountType: "Organization",
+      repoCount: 1,
+      syncStatus: "succeeded",
+      lastSyncAt: new Date().toISOString(),
+      lastSyncError: null,
+      updatedAt: new Date().toISOString()
     }),
+    setGitHubInstallationSyncState: vi.fn().mockResolvedValue(undefined),
+    upsertGitHubRepositories: vi.fn().mockResolvedValue(undefined),
+    listGitHubRepositories: vi.fn().mockResolvedValue([]),
+    getGitHubRepository: vi.fn().mockResolvedValue({
+      installationId: 1,
+      repoId: 100,
+      owner: "acme",
+      name: "demo",
+      fullName: "acme/demo",
+      defaultBranch: "main",
+      isPrivate: false,
+      isArchived: false,
+      htmlUrl: "https://github.com/acme/demo",
+      pushedAt: new Date().toISOString(),
+      analysisStatus: "analyzed",
+      deployabilityStatus: "deployable",
+      deployabilityReason: null,
+      detectedFramework: "nextjs",
+      packageManager: "pnpm",
+      linkedProjectId: null,
+      analyzedAt: new Date().toISOString(),
+      syncedAt: new Date().toISOString()
+    }),
+    reserveNextManagedPort: vi.fn().mockResolvedValue(6100),
+    linkGitHubRepositoryToProject: vi.fn().mockResolvedValue(undefined),
+    upsertGitHubInstallation: vi.fn().mockResolvedValue(undefined),
+    createProject: vi.fn().mockResolvedValue(baseProject),
     writeAuditLog: vi.fn().mockResolvedValue(undefined),
     listProjects: vi.fn().mockResolvedValue([]),
+    getProject: vi.fn().mockResolvedValue(baseProject),
+    getProjectByRepo: vi.fn().mockResolvedValue(baseProject),
     getProjectDetail: vi.fn().mockResolvedValue({
       project: {
-        id: "project-1",
-        name: "Project One",
-        repoOwner: "acme",
-        repoName: "demo",
-        installationId: 1,
-        defaultBranch: "main",
-        configPath: ".autoops/pipeline.yml",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        ...baseProject,
         targetCount: 1,
         latestRunStatus: "running"
       },
       recentRuns: [],
       deploymentTargets: [],
       installation: null,
+      repository: null,
       secretNames: ["ghcr_token"]
     }),
     updateProject: vi.fn().mockResolvedValue({
-      id: "project-1",
-      name: "Project One",
-      repoOwner: "acme",
-      repoName: "demo",
-      installationId: 1,
-      defaultBranch: "main",
-      configPath: ".autoops/pipeline.yml",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      ...baseProject,
       targetCount: 1,
       latestRunStatus: "running"
     }),
     listRuns: vi.fn().mockResolvedValue([]),
     getRunDetail: vi.fn().mockResolvedValue(null),
     listRunLogs: vi.fn().mockResolvedValue([]),
+    createRun: vi.fn().mockResolvedValue({
+      id: "run-manual",
+      projectId: "project-1",
+      projectName: "Project One",
+      source: "manual_deploy",
+      branch: "main",
+      commitSha: "abcdef123456",
+      status: "queued",
+      queuedAt: new Date().toISOString(),
+      startedAt: null,
+      finishedAt: null,
+      triggeredBy: "admin@autoops.local",
+      errorMessage: null
+    }),
+    supersedeQueuedRuns: vi.fn().mockResolvedValue(undefined),
     rerun: vi.fn().mockResolvedValue({
       id: "run-2"
     }),
+    syncDeploymentTargets: vi.fn().mockResolvedValue([]),
     listDeploymentTargets: vi.fn().mockResolvedValue([]),
     listDeploymentRevisions: vi.fn().mockResolvedValue([]),
     getDeploymentTargetDetail: vi.fn().mockResolvedValue({
@@ -101,10 +159,14 @@ function createDbMock() {
         projectId: "project-1",
         projectName: "Project One",
         name: "production",
+        targetType: "ssh_compose",
         hostRef: "prod",
         composeFile: "/srv/app/docker-compose.yml",
         service: "app",
         healthcheckUrl: "https://example.com/health",
+        managedPort: null,
+        managedRuntimeDir: null,
+        managedDomain: null,
         lastStatus: "failed",
         lastDeployedImage: "ghcr.io/acme/demo:123",
         lastDeployedAt: new Date().toISOString(),
@@ -138,7 +200,10 @@ function createDbMock() {
 function createGithubMock() {
   return {
     getInstallUrl: vi.fn().mockReturnValue("https://github.example/install"),
-    fetchRepositoryFile: vi.fn()
+    fetchRepositoryFile: vi.fn(),
+    fetchRepositoryFileOptional: vi.fn(),
+    listInstallationRepositories: vi.fn().mockResolvedValue([]),
+    getBranchHeadSha: vi.fn().mockResolvedValue("abcdef1234567890")
   };
 }
 
@@ -300,5 +365,195 @@ describe("createApp", () => {
       kind: "audit",
       status: "completed"
     });
+  });
+
+  it("syncs installation repositories and stores analysis results", async () => {
+    const db = createDbMock();
+    db.listGitHubRepositories.mockResolvedValue([
+      {
+        installationId: 1,
+        repoId: 100,
+        owner: "acme",
+        name: "demo",
+        fullName: "acme/demo",
+        defaultBranch: "main",
+        isPrivate: false,
+        isArchived: false,
+        htmlUrl: "https://github.com/acme/demo",
+        pushedAt: new Date().toISOString(),
+        analysisStatus: "analyzed",
+        deployabilityStatus: "deployable",
+        deployabilityReason: null,
+        detectedFramework: "nextjs",
+        packageManager: "npm",
+        linkedProjectId: null,
+        analyzedAt: new Date().toISOString(),
+        syncedAt: new Date().toISOString()
+      }
+    ]);
+    const github = createGithubMock();
+    github.listInstallationRepositories.mockResolvedValue([
+      {
+        repoId: 100,
+        owner: "acme",
+        name: "demo",
+        fullName: "acme/demo",
+        defaultBranch: "main",
+        isPrivate: false,
+        isArchived: false,
+        htmlUrl: "https://github.com/acme/demo",
+        pushedAt: new Date().toISOString()
+      }
+    ]);
+    github.fetchRepositoryFileOptional.mockImplementation(async ({ path }: { path: string }) => {
+      if (path === "package.json") {
+        return JSON.stringify({
+          scripts: {
+            build: "next build",
+            start: "next start"
+          },
+          dependencies: {
+            next: "15.0.0"
+          }
+        });
+      }
+      if (path === "package-lock.json") {
+        return "{}";
+      }
+      return null;
+    });
+
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: github as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/github/installations/1/sync")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(db.setGitHubInstallationSyncState).toHaveBeenCalled();
+    expect(db.upsertGitHubRepositories).toHaveBeenCalledTimes(1);
+    expect(response.body.repositories[0].deployabilityStatus).toBe("deployable");
+  });
+
+  it("imports a deployable repository into a managed Next.js project", async () => {
+    const db = createDbMock();
+    db.getProjectByRepo = vi.fn().mockResolvedValue(null);
+    const createdProject = {
+      id: "project-managed",
+      name: "demo",
+      repoOwner: "acme",
+      repoName: "demo",
+      installationId: 1,
+      mode: "managed_nextjs",
+      githubRepoId: 100,
+      defaultBranch: "main",
+      configPath: ".autoops/pipeline.yml",
+      appSlug: "acme-demo-100",
+      primaryUrl: "http://localhost:6100",
+      managedConfig: {
+        framework: "nextjs",
+        packageManager: "pnpm",
+        installCommand: "pnpm install --frozen-lockfile",
+        buildCommand: "pnpm build",
+        startCommand: "pnpm start",
+        nodeVersion: "20",
+        outputPort: 3000
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      targetCount: 1,
+      latestRunStatus: null
+    };
+    db.createProject.mockResolvedValue(createdProject);
+    db.getProject.mockResolvedValue(createdProject);
+
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/github/repositories/import")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        installationId: 1,
+        repoId: 100
+      });
+
+    expect(response.status).toBe(201);
+    expect(db.createProject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "managed_nextjs",
+        githubRepoId: 100,
+        appSlug: expect.stringContaining("acme-demo")
+      })
+    );
+    expect(db.syncDeploymentTargets).toHaveBeenCalledTimes(1);
+    expect(db.linkGitHubRepositoryToProject).toHaveBeenCalledWith(1, 100, "project-managed");
+  });
+
+  it("queues an explicit managed deployment for imported projects", async () => {
+    const db = createDbMock();
+    db.getProject.mockResolvedValue({
+      id: "project-managed",
+      name: "demo",
+      repoOwner: "acme",
+      repoName: "demo",
+      installationId: 1,
+      mode: "managed_nextjs",
+      githubRepoId: 100,
+      defaultBranch: "main",
+      configPath: ".autoops/pipeline.yml",
+      appSlug: "acme-demo-100",
+      primaryUrl: "http://localhost:6100",
+      managedConfig: {
+        framework: "nextjs",
+        packageManager: "pnpm",
+        installCommand: "pnpm install --frozen-lockfile",
+        buildCommand: "pnpm build",
+        startCommand: "pnpm start",
+        nodeVersion: "20",
+        outputPort: 3000
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      targetCount: 1,
+      latestRunStatus: null
+    });
+    const github = createGithubMock();
+    github.getBranchHeadSha.mockResolvedValue("abcdef1234567890");
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: github as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/projects/project-managed/deploy")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(202);
+    expect(github.getBranchHeadSha).toHaveBeenCalledWith({
+      installationId: 1,
+      owner: "acme",
+      repo: "demo",
+      branch: "main"
+    });
+    expect(db.createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-managed",
+        source: "manual_deploy",
+        branch: "main",
+        commitSha: "abcdef1234567890"
+      })
+    );
   });
 });

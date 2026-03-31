@@ -11,6 +11,7 @@ import { NewProjectPage } from "./pages/NewProjectPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { RepositoriesPage } from "./pages/RepositoriesPage";
 import { RunsPage } from "./pages/RunsPage";
 
 export function App() {
@@ -112,6 +113,7 @@ export function App() {
             <Route index element={<OverviewPage />} />
             <Route path="runs" element={<RunsPage />} />
             <Route path="deployments" element={<DeploymentsPage />} />
+            <Route path="repositories" element={<RepositoriesPage />} />
             <Route path="projects" element={<ProjectsPage />} />
             <Route path="projects/new" element={<NewProjectPage />} />
             <Route path="projects/:projectId" element={<ProjectDetailPage />} />

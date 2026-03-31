@@ -39,6 +39,10 @@ services:
         condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/autoops-managed:/opt/autoops-managed
+    networks:
+      - default
+      - managed
 
   web:
     build:
@@ -52,5 +56,28 @@ services:
     ports:
       - "5173:80"
 
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: autoops-caddy
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/autoops-managed/caddy/sites:/etc/caddy/sites
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - managed
+
 volumes:
+  caddy-config:
+  caddy-data:
   postgres-data:
+
+networks:
+  managed:
+    name: autoops-managed

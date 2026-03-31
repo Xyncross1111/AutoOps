@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -5,7 +6,6 @@ import {
   parsePipelineConfig,
   selectRollbackRevision,
   type DeploymentTargetSummary,
-  type DeploymentRevisionSummary,
   type PipelineConfig
 } from "@autoops/core";
 import type { AutoOpsDb, ClaimedRun } from "@autoops/db";
@@ -55,6 +55,11 @@ export class PipelineWorker {
   }
 
   private async handlePipelineRun(run: ClaimedRun): Promise<void> {
+    if (run.mode === "managed_nextjs") {
+      await this.handleManagedNextjsRun(run);
+      return;
+    }
+
     let workdir = "";
     try {
       let pipelineConfig: PipelineConfig | null = run.pipelineConfig;
@@ -200,6 +205,124 @@ export class PipelineWorker {
     }
   }
 
+  private async handleManagedNextjsRun(run: ClaimedRun): Promise<void> {
+    if (!run.appSlug || !run.managedConfig) {
+      throw new Error("Managed Next.js project metadata is incomplete.");
+    }
+
+    const managedConfig = run.managedConfig;
+    let workdir = "";
+    const log = async (stageName: string, line: string) => {
+      await this.db.appendRunLog(run.id, stageName, line);
+    };
+
+    try {
+      const deploymentTargets = await this.db.listDeploymentTargets(run.projectId);
+      const target = deploymentTargets.find(
+        (candidate) => candidate.targetType === "managed_vps"
+      );
+
+      if (!target || !target.managedPort || !target.managedRuntimeDir) {
+        throw new Error("Managed deployment target is not configured.");
+      }
+
+      const localTag = `autoops-managed-${run.appSlug}:${run.id}`;
+
+      await this.runStage(run.id, "prepare", 1, async () => {
+        const token = await this.github.createInstallationToken(run.installationId);
+        workdir = await this.infra.cloneRepository({
+          owner: run.repoOwner,
+          repo: run.repoName,
+          commitSha: run.commitSha,
+          token,
+          baseTempDir: this.config.RUNNER_TEMP_DIR,
+          onOutput: (line) => log("prepare", line)
+        });
+        await writeManagedBuildFiles(workdir, managedConfig);
+        await log(
+          "prepare",
+          `Prepared managed Next.js build context for ${run.repoOwner}/${run.repoName}.`
+        );
+      });
+
+      await this.runStage(run.id, "build", 2, async () => {
+        await this.infra.buildImage({
+          workdir,
+          context: ".",
+          dockerfile: "Dockerfile.autoops",
+          localTag,
+          onOutput: (line) => log("build", line)
+        });
+        await log("build", `Built managed image ${localTag}.`);
+      });
+
+      const imageId = await this.runStage(run.id, "test", 3, async () => {
+        await log("test", "Managed Next.js imports use framework detection instead of custom test commands.");
+        return this.infra.inspectImageId({ imageTag: localTag });
+      });
+
+      await this.runStage(run.id, "deploy", 4, async () => {
+        await this.infra.deployManagedTarget({
+          appSlug: run.appSlug!,
+          runtimeDir: target.managedRuntimeDir!,
+          composeFile: target.composeFile,
+          service: target.service,
+          imageTag: localTag,
+          publicPort: target.managedPort!,
+          networkName: this.config.MANAGED_NETWORK_NAME,
+          managedDomain: target.managedDomain,
+          edgeContainerName: this.config.MANAGED_BASE_DOMAIN
+            ? this.config.MANAGED_EDGE_CONTAINER_NAME
+            : null,
+          onOutput: (line) => log("deploy", line)
+        });
+        await this.infra.waitForHealthcheck({
+          url: target.healthcheckUrl,
+          timeoutSeconds: 60,
+          onOutput: (line) => log("deploy", line)
+        });
+        await this.db.createDeploymentRevision({
+          targetId: target.id,
+          runId: run.id,
+          imageRef: localTag,
+          imageDigest: imageId,
+          status: "succeeded"
+        });
+        await this.db.markDeploymentTargetStatus({
+          targetId: target.id,
+          lastStatus: "succeeded",
+          lastDeployedImage: `${localTag}@${imageId}`,
+          lastError: null
+        });
+      });
+    } catch (error) {
+      const deploymentTargets = await this.db.listDeploymentTargets(run.projectId);
+      const target = deploymentTargets.find(
+        (candidate) => candidate.targetType === "managed_vps"
+      );
+      if (target) {
+        await this.db.markDeploymentTargetStatus({
+          targetId: target.id,
+          lastStatus: "failed",
+          lastError: error instanceof Error ? error.message : "Managed deployment failed."
+        });
+        await this.performAutomaticRollback(
+          run,
+          target,
+          target.healthcheckUrl,
+          60,
+          undefined,
+          log
+        );
+      }
+      throw error;
+    } finally {
+      if (workdir) {
+        await this.infra.cleanupPath(workdir);
+      }
+    }
+  }
+
   private async handleManualRollback(run: ClaimedRun): Promise<void> {
     const request = run.metadata.manualRollback;
     if (!request) {
@@ -213,7 +336,8 @@ export class PipelineWorker {
     }
 
     const secrets = await this.loadProjectSecrets(run.projectId);
-    const connection = resolveTargetSecrets(secrets, target.hostRef);
+    const connection =
+      target.targetType === "ssh_compose" ? resolveTargetSecrets(secrets, target.hostRef) : undefined;
     const rollbackEventId = await this.db.createRollbackEvent({
       targetId: target.id,
       runId: run.id,
@@ -231,17 +355,39 @@ export class PipelineWorker {
           "rollback",
           `Rolling back ${target.name} to ${revision.imageRef}@${revision.imageDigest}.`
         );
-        await this.infra.deployComposeTarget({
-          host: connection.host,
-          user: connection.user,
-          privateKey: connection.privateKey,
-          port: connection.port,
-          composeFile: target.composeFile,
-          service: target.service,
-          imageRef: revision.imageRef,
-          imageDigest: revision.imageDigest,
-          onOutput: (line) => this.db.appendRunLog(run.id, "rollback", line)
-        });
+        if (target.targetType === "managed_vps") {
+          if (!run.appSlug || !target.managedPort || !target.managedRuntimeDir) {
+            throw new Error("Managed rollback target is missing runtime metadata.");
+          }
+          await this.infra.deployManagedTarget({
+            appSlug: run.appSlug,
+            runtimeDir: target.managedRuntimeDir,
+            composeFile: target.composeFile,
+            service: target.service,
+            imageTag: revision.imageRef,
+            publicPort: target.managedPort,
+            networkName: this.config.MANAGED_NETWORK_NAME,
+            managedDomain: target.managedDomain,
+            edgeContainerName: this.config.MANAGED_BASE_DOMAIN
+              ? this.config.MANAGED_EDGE_CONTAINER_NAME
+              : null,
+            onOutput: (line) => this.db.appendRunLog(run.id, "rollback", line)
+          });
+        } else if (connection) {
+          await this.infra.deployComposeTarget({
+            host: connection.host,
+            user: connection.user,
+            privateKey: connection.privateKey,
+            port: connection.port,
+            composeFile: target.composeFile,
+            service: target.service,
+            imageRef: revision.imageRef,
+            imageDigest: revision.imageDigest,
+            onOutput: (line) => this.db.appendRunLog(run.id, "rollback", line)
+          });
+        } else {
+          throw new Error("SSH rollback target connection is missing.");
+        }
         await this.infra.waitForHealthcheck({
           url: target.healthcheckUrl,
           onOutput: (line) => this.db.appendRunLog(run.id, "rollback", line)
@@ -277,12 +423,14 @@ export class PipelineWorker {
     target: DeploymentTargetSummary,
     healthcheckUrl: string,
     timeoutSeconds: number | undefined,
-    connection: {
-      host: string;
-      user: string;
-      privateKey: string;
-      port?: number;
-    },
+    connection:
+      | {
+          host: string;
+          user: string;
+          privateKey: string;
+          port?: number;
+        }
+      | undefined,
     log: (stageName: string, line: string) => Promise<void>
   ): Promise<void> {
     const revisions = await this.db.listTargetRevisions(target.id);
@@ -308,17 +456,39 @@ export class PipelineWorker {
         "deploy",
         `Attempting automatic rollback for ${target.name} to ${revision.imageRef}@${revision.imageDigest}.`
       );
-      await this.infra.deployComposeTarget({
-        host: connection.host,
-        user: connection.user,
-        privateKey: connection.privateKey,
-        port: connection.port,
-        composeFile: target.composeFile,
-        service: target.service,
-        imageRef: revision.imageRef,
-        imageDigest: revision.imageDigest,
-        onOutput: (line) => log("deploy", `[rollback:${target.name}] ${line}`)
-      });
+      if (target.targetType === "managed_vps") {
+        if (!run.appSlug || !target.managedPort || !target.managedRuntimeDir) {
+          throw new Error("Managed rollback target is missing runtime metadata.");
+        }
+        await this.infra.deployManagedTarget({
+          appSlug: run.appSlug,
+          runtimeDir: target.managedRuntimeDir,
+          composeFile: target.composeFile,
+          service: target.service,
+          imageTag: revision.imageRef,
+          publicPort: target.managedPort,
+          networkName: this.config.MANAGED_NETWORK_NAME,
+          managedDomain: target.managedDomain,
+          edgeContainerName: this.config.MANAGED_BASE_DOMAIN
+            ? this.config.MANAGED_EDGE_CONTAINER_NAME
+            : null,
+          onOutput: (line) => log("deploy", `[rollback:${target.name}] ${line}`)
+        });
+      } else if (connection) {
+        await this.infra.deployComposeTarget({
+          host: connection.host,
+          user: connection.user,
+          privateKey: connection.privateKey,
+          port: connection.port,
+          composeFile: target.composeFile,
+          service: target.service,
+          imageRef: revision.imageRef,
+          imageDigest: revision.imageDigest,
+          onOutput: (line) => log("deploy", `[rollback:${target.name}] ${line}`)
+        });
+      } else {
+        throw new Error("SSH rollback target connection is missing.");
+      }
       await this.infra.waitForHealthcheck({
         url: healthcheckUrl,
         timeoutSeconds,
@@ -426,4 +596,50 @@ function findTargetSummary(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+async function writeManagedBuildFiles(
+  workdir: string,
+  config: {
+    installCommand: string;
+    buildCommand: string;
+    startCommand: string;
+    nodeVersion: string;
+  }
+): Promise<void> {
+  await writeFile(
+    join(workdir, "Dockerfile.autoops"),
+    [
+      `FROM node:${config.nodeVersion}-alpine`,
+      "WORKDIR /app",
+      "ENV NODE_ENV=production",
+      "ENV NEXT_TELEMETRY_DISABLED=1",
+      "ENV HOSTNAME=0.0.0.0",
+      "ENV PORT=3000",
+      "RUN corepack enable",
+      "COPY . .",
+      `RUN ${config.installCommand}`,
+      `RUN ${config.buildCommand}`,
+      'EXPOSE 3000',
+      `CMD ["sh", "-lc", "${escapeForDoubleQuotedShell(config.startCommand)}"]`
+    ].join("\n"),
+    "utf8"
+  );
+
+  await writeFile(
+    join(workdir, ".dockerignore"),
+    [
+      ".git",
+      "node_modules",
+      ".next",
+      "dist",
+      "coverage",
+      ".turbo"
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+function escapeForDoubleQuotedShell(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }

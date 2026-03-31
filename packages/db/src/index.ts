@@ -7,10 +7,16 @@ import type {
   DashboardOverview,
   DeploymentRevisionSummary,
   DeploymentTargetDetail,
+  DeploymentTargetType,
   DeploymentTargetSummary,
+  GitHubRepositoryFilters,
+  GitHubRepositorySummary,
+  ManagedAppPackageManager,
+  ManagedNextjsConfig,
   PipelineConfig,
   PipelineRunSummary,
   ProjectDetail,
+  ProjectMode,
   ProjectInstallationSummary,
   ProjectSummary,
   ProjectUpdateInput,
@@ -29,6 +35,10 @@ CREATE TABLE IF NOT EXISTS github_installations (
   installation_id BIGINT PRIMARY KEY,
   account_login TEXT NOT NULL,
   account_type TEXT NOT NULL,
+  repo_count INTEGER NOT NULL DEFAULT 0,
+  sync_status TEXT NOT NULL DEFAULT 'idle',
+  last_sync_at TIMESTAMPTZ,
+  last_sync_error TEXT,
   installed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -39,8 +49,13 @@ CREATE TABLE IF NOT EXISTS projects (
   repo_owner TEXT NOT NULL,
   repo_name TEXT NOT NULL,
   installation_id BIGINT NOT NULL REFERENCES github_installations(installation_id) ON DELETE RESTRICT,
+  mode TEXT NOT NULL DEFAULT 'custom_pipeline',
+  github_repo_id BIGINT,
   default_branch TEXT NOT NULL,
   config_path TEXT NOT NULL DEFAULT '.autoops/pipeline.yml',
+  app_slug TEXT,
+  primary_url TEXT,
+  generated_config JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (repo_owner, repo_name)
@@ -54,6 +69,33 @@ CREATE TABLE IF NOT EXISTS project_secrets (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (project_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS github_repositories (
+  installation_id BIGINT NOT NULL REFERENCES github_installations(installation_id) ON DELETE CASCADE,
+  github_repo_id BIGINT NOT NULL,
+  owner TEXT NOT NULL,
+  name TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  default_branch TEXT NOT NULL,
+  is_private BOOLEAN NOT NULL,
+  is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+  html_url TEXT NOT NULL,
+  pushed_at TIMESTAMPTZ,
+  analysis_status TEXT NOT NULL DEFAULT 'pending',
+  deployability_status TEXT NOT NULL DEFAULT 'unsupported',
+  deployability_reason TEXT,
+  detected_framework TEXT,
+  package_manager TEXT,
+  linked_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  analyzed_at TIMESTAMPTZ,
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (installation_id, github_repo_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_repositories_owner_name
+  ON github_repositories (owner, name);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -114,10 +156,14 @@ CREATE TABLE IF NOT EXISTS deployment_targets (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  target_type TEXT NOT NULL DEFAULT 'ssh_compose',
   host_ref TEXT NOT NULL,
   compose_file TEXT NOT NULL,
   service TEXT NOT NULL,
   healthcheck_url TEXT NOT NULL,
+  managed_port INTEGER,
+  managed_runtime_dir TEXT,
+  managed_domain TEXT,
   last_status TEXT,
   last_deployed_image TEXT,
   last_deployed_at TIMESTAMPTZ,
@@ -164,6 +210,22 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE github_installations ADD COLUMN IF NOT EXISTS repo_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE github_installations ADD COLUMN IF NOT EXISTS sync_status TEXT NOT NULL DEFAULT 'idle';
+ALTER TABLE github_installations ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ;
+ALTER TABLE github_installations ADD COLUMN IF NOT EXISTS last_sync_error TEXT;
+
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'custom_pipeline';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_repo_id BIGINT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS app_slug TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS primary_url TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS generated_config JSONB;
+
+ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS target_type TEXT NOT NULL DEFAULT 'ssh_compose';
+ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_port INTEGER;
+ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_runtime_dir TEXT;
+ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_domain TEXT;
 `;
 
 type JsonRecord = Record<string, unknown>;
@@ -174,8 +236,13 @@ interface ProjectRow {
   repo_owner: string;
   repo_name: string;
   installation_id: number;
+  mode: ProjectMode;
+  github_repo_id: string | number | null;
   default_branch: string;
   config_path: string;
+  app_slug: string | null;
+  primary_url: string | null;
+  generated_config: ManagedNextjsConfig | null;
   created_at: string;
   updated_at: string;
   target_count?: number;
@@ -204,10 +271,14 @@ interface DeploymentTargetRow {
   project_id: string;
   project_name: string;
   name: string;
+  target_type: DeploymentTargetType;
   host_ref: string;
   compose_file: string;
   service: string;
   healthcheck_url: string;
+  managed_port: number | null;
+  managed_runtime_dir: string | null;
+  managed_domain: string | null;
   last_status: string | null;
   last_deployed_image: string | null;
   last_deployed_at: string | null;
@@ -232,7 +303,32 @@ interface InstallationRow {
   installation_id: number;
   account_login: string;
   account_type: string;
+  repo_count: number;
+  sync_status: string;
+  last_sync_at: string | null;
+  last_sync_error: string | null;
   updated_at: string;
+}
+
+interface GitHubRepositoryRow {
+  installation_id: number;
+  github_repo_id: string | number;
+  owner: string;
+  name: string;
+  full_name: string;
+  default_branch: string;
+  is_private: boolean;
+  is_archived: boolean;
+  html_url: string;
+  pushed_at: string | null;
+  analysis_status: "pending" | "analyzed" | "failed";
+  deployability_status: "deployable" | "unsupported" | "imported" | "archived";
+  deployability_reason: string | null;
+  detected_framework: string | null;
+  package_manager: ManagedAppPackageManager | null;
+  linked_project_id: string | null;
+  analyzed_at: string | null;
+  synced_at: string;
 }
 
 interface AuditLogRow {
@@ -262,8 +358,13 @@ export interface CreateProjectInput {
   repoOwner: string;
   repoName: string;
   installationId: number;
+  mode?: ProjectMode;
+  githubRepoId?: number | null;
   defaultBranch: string;
   configPath?: string;
+  appSlug?: string | null;
+  primaryUrl?: string | null;
+  managedConfig?: ManagedNextjsConfig | null;
   secrets?: Record<string, string>;
 }
 
@@ -286,8 +387,13 @@ export interface ClaimedRun {
   repoOwner: string;
   repoName: string;
   installationId: number;
+  mode: ProjectMode;
+  githubRepoId: number | null;
   defaultBranch: string;
   configPath: string;
+  appSlug: string | null;
+  primaryUrl: string | null;
+  managedConfig: ManagedNextjsConfig | null;
   branch: string;
   commitSha: string;
   source: RunSource;
@@ -411,10 +517,13 @@ export class AutoOpsDb {
       return null;
     }
 
-    const [recentRuns, deploymentTargets, installation, secrets] = await Promise.all([
+    const [recentRuns, deploymentTargets, installation, repository, secrets] = await Promise.all([
       this.listRuns({ projectId, limit: 10 }),
       this.listDeploymentTargets(projectId),
       this.getGitHubInstallation(project.installationId),
+      project.githubRepoId !== null
+        ? this.getGitHubRepository(project.installationId, project.githubRepoId)
+        : Promise.resolve(null),
       this.listProjectSecrets(projectId)
     ]);
 
@@ -423,6 +532,7 @@ export class AutoOpsDb {
       recentRuns,
       deploymentTargets,
       installation,
+      repository,
       secretNames: Object.keys(secrets).sort()
     };
   }
@@ -432,8 +542,19 @@ export class AutoOpsDb {
     await this.pool.query(
       `
         INSERT INTO projects (
-          id, name, repo_owner, repo_name, installation_id, default_branch, config_path
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+          id,
+          name,
+          repo_owner,
+          repo_name,
+          installation_id,
+          mode,
+          github_repo_id,
+          default_branch,
+          config_path,
+          app_slug,
+          primary_url,
+          generated_config
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
       `,
       [
         id,
@@ -441,8 +562,13 @@ export class AutoOpsDb {
         input.repoOwner,
         input.repoName,
         input.installationId,
+        input.mode ?? "custom_pipeline",
+        input.githubRepoId ?? null,
         input.defaultBranch,
-        input.configPath ?? ".autoops/pipeline.yml"
+        input.configPath ?? ".autoops/pipeline.yml",
+        input.appSlug ?? null,
+        input.primaryUrl ?? null,
+        input.managedConfig ? JSON.stringify(input.managedConfig) : null
       ]
     );
     if (input.secrets) {
@@ -570,7 +696,15 @@ export class AutoOpsDb {
   > {
     const result = await this.pool.query<InstallationRow>(
       `
-        SELECT installation_id, account_login, account_type, updated_at
+        SELECT
+          installation_id,
+          account_login,
+          account_type,
+          repo_count,
+          sync_status,
+          last_sync_at,
+          last_sync_error,
+          updated_at
         FROM github_installations
         ORDER BY updated_at DESC
       `
@@ -583,13 +717,272 @@ export class AutoOpsDb {
   ): Promise<ProjectInstallationSummary | null> {
     const result = await this.pool.query<InstallationRow>(
       `
-        SELECT installation_id, account_login, account_type, updated_at
+        SELECT
+          installation_id,
+          account_login,
+          account_type,
+          repo_count,
+          sync_status,
+          last_sync_at,
+          last_sync_error,
+          updated_at
         FROM github_installations
         WHERE installation_id = $1
       `,
       [installationId]
     );
     return result.rows[0] ? mapInstallationSummary(result.rows[0]) : null;
+  }
+
+  async setGitHubInstallationSyncState(input: {
+    installationId: number;
+    syncStatus: string;
+    repoCount?: number;
+    lastSyncError?: string | null;
+    touchLastSync?: boolean;
+  }): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE github_installations
+        SET sync_status = $2,
+            repo_count = COALESCE($3, repo_count),
+            last_sync_error = $4,
+            last_sync_at = CASE WHEN $5 THEN NOW() ELSE last_sync_at END,
+            updated_at = NOW()
+        WHERE installation_id = $1
+      `,
+      [
+        input.installationId,
+        input.syncStatus,
+        input.repoCount ?? null,
+        input.lastSyncError ?? null,
+        input.touchLastSync ?? false
+      ]
+    );
+  }
+
+  async upsertGitHubRepositories(
+    installationId: number,
+    repositories: Array<{
+      repoId: number;
+      owner: string;
+      name: string;
+      fullName: string;
+      defaultBranch: string;
+      isPrivate: boolean;
+      isArchived: boolean;
+      htmlUrl: string;
+      pushedAt: string | null;
+      analysisStatus: "pending" | "analyzed" | "failed";
+      deployabilityStatus: "deployable" | "unsupported" | "imported" | "archived";
+      deployabilityReason: string | null;
+      detectedFramework: string | null;
+      packageManager: ManagedAppPackageManager | null;
+      analyzedAt: string | null;
+    }>
+  ): Promise<void> {
+    for (const repository of repositories) {
+      await this.pool.query(
+        `
+          INSERT INTO github_repositories (
+            installation_id,
+            github_repo_id,
+            owner,
+            name,
+            full_name,
+            default_branch,
+            is_private,
+            is_archived,
+            html_url,
+            pushed_at,
+            analysis_status,
+            deployability_status,
+            deployability_reason,
+            detected_framework,
+            package_manager,
+            analyzed_at,
+            synced_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15, $16, NOW()
+          )
+          ON CONFLICT (installation_id, github_repo_id)
+          DO UPDATE SET
+            owner = EXCLUDED.owner,
+            name = EXCLUDED.name,
+            full_name = EXCLUDED.full_name,
+            default_branch = EXCLUDED.default_branch,
+            is_private = EXCLUDED.is_private,
+            is_archived = EXCLUDED.is_archived,
+            html_url = EXCLUDED.html_url,
+            pushed_at = EXCLUDED.pushed_at,
+            analysis_status = EXCLUDED.analysis_status,
+            deployability_status = EXCLUDED.deployability_status,
+            deployability_reason = EXCLUDED.deployability_reason,
+            detected_framework = EXCLUDED.detected_framework,
+            package_manager = EXCLUDED.package_manager,
+            analyzed_at = EXCLUDED.analyzed_at,
+            synced_at = NOW(),
+            updated_at = NOW()
+        `,
+        [
+          installationId,
+          repository.repoId,
+          repository.owner,
+          repository.name,
+          repository.fullName,
+          repository.defaultBranch,
+          repository.isPrivate,
+          repository.isArchived,
+          repository.htmlUrl,
+          repository.pushedAt,
+          repository.analysisStatus,
+          repository.deployabilityStatus,
+          repository.deployabilityReason,
+          repository.detectedFramework,
+          repository.packageManager,
+          repository.analyzedAt
+        ]
+      );
+    }
+  }
+
+  async listGitHubRepositories(
+    filters: GitHubRepositoryFilters = {}
+  ): Promise<GitHubRepositorySummary[]> {
+    const values: unknown[] = [];
+    const clauses: string[] = [];
+
+    if (filters.installationId) {
+      values.push(filters.installationId);
+      clauses.push(`installation_id = $${values.length}`);
+    }
+    if (filters.search) {
+      values.push(`%${filters.search.toLowerCase()}%`);
+      clauses.push(
+        `(LOWER(owner) LIKE $${values.length} OR LOWER(name) LIKE $${values.length} OR LOWER(full_name) LIKE $${values.length})`
+      );
+    }
+    if (filters.deployable === true) {
+      clauses.push(`deployability_status = 'deployable'`);
+    }
+    if (filters.imported === true) {
+      clauses.push(`linked_project_id IS NOT NULL`);
+    }
+
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const result = await this.pool.query<GitHubRepositoryRow>(
+      `
+        SELECT
+          installation_id,
+          github_repo_id,
+          owner,
+          name,
+          full_name,
+          default_branch,
+          is_private,
+          is_archived,
+          html_url,
+          pushed_at,
+          analysis_status,
+          deployability_status,
+          deployability_reason,
+          detected_framework,
+          package_manager,
+          linked_project_id,
+          analyzed_at,
+          synced_at
+        FROM github_repositories
+        ${where}
+        ORDER BY synced_at DESC, full_name ASC
+      `,
+      values
+    );
+
+    return result.rows.map(mapGitHubRepositorySummary);
+  }
+
+  async getGitHubRepository(
+    installationId: number,
+    repoId: number
+  ): Promise<GitHubRepositorySummary | null> {
+    const result = await this.pool.query<GitHubRepositoryRow>(
+      `
+        SELECT
+          installation_id,
+          github_repo_id,
+          owner,
+          name,
+          full_name,
+          default_branch,
+          is_private,
+          is_archived,
+          html_url,
+          pushed_at,
+          analysis_status,
+          deployability_status,
+          deployability_reason,
+          detected_framework,
+          package_manager,
+          linked_project_id,
+          analyzed_at,
+          synced_at
+        FROM github_repositories
+        WHERE installation_id = $1 AND github_repo_id = $2
+      `,
+      [installationId, repoId]
+    );
+
+    return result.rows[0] ? mapGitHubRepositorySummary(result.rows[0]) : null;
+  }
+
+  async getGitHubRepositoryByProject(projectId: string): Promise<GitHubRepositorySummary | null> {
+    const result = await this.pool.query<GitHubRepositoryRow>(
+      `
+        SELECT
+          installation_id,
+          github_repo_id,
+          owner,
+          name,
+          full_name,
+          default_branch,
+          is_private,
+          is_archived,
+          html_url,
+          pushed_at,
+          analysis_status,
+          deployability_status,
+          deployability_reason,
+          detected_framework,
+          package_manager,
+          linked_project_id,
+          analyzed_at,
+          synced_at
+        FROM github_repositories
+        WHERE linked_project_id = $1
+        LIMIT 1
+      `,
+      [projectId]
+    );
+
+    return result.rows[0] ? mapGitHubRepositorySummary(result.rows[0]) : null;
+  }
+
+  async linkGitHubRepositoryToProject(
+    installationId: number,
+    repoId: number,
+    projectId: string
+  ): Promise<void> {
+    await this.pool.query(
+      `
+        UPDATE github_repositories
+        SET linked_project_id = $3,
+            deployability_status = 'imported',
+            updated_at = NOW()
+        WHERE installation_id = $1 AND github_repo_id = $2
+      `,
+      [installationId, repoId, projectId]
+    );
   }
 
   async hasWebhookDelivery(deliveryId: string): Promise<boolean> {
@@ -1021,8 +1414,13 @@ export class AutoOpsDb {
         repo_owner: string;
         repo_name: string;
         installation_id: number;
+        mode: ProjectMode;
+        github_repo_id: string | number | null;
         default_branch: string;
         config_path: string;
+        app_slug: string | null;
+        primary_url: string | null;
+        generated_config: ManagedNextjsConfig | null;
       }>(
         `
           UPDATE pipeline_runs r
@@ -1044,8 +1442,13 @@ export class AutoOpsDb {
             p.repo_owner,
             p.repo_name,
             p.installation_id,
+            p.mode,
+            p.github_repo_id,
             p.default_branch,
-            p.config_path
+            p.config_path,
+            p.app_slug,
+            p.primary_url,
+            p.generated_config
         `,
         [nextId]
       );
@@ -1059,8 +1462,13 @@ export class AutoOpsDb {
             repoOwner: row.repo_owner,
             repoName: row.repo_name,
             installationId: Number(row.installation_id),
+            mode: row.mode,
+            githubRepoId: row.github_repo_id === null ? null : Number(row.github_repo_id),
             defaultBranch: row.default_branch,
             configPath: row.config_path,
+            appSlug: row.app_slug,
+            primaryUrl: row.primary_url,
+            managedConfig: row.generated_config,
             branch: row.branch,
             commitSha: row.commit_sha,
             source: row.source,
@@ -1081,35 +1489,57 @@ export class AutoOpsDb {
     projectId: string,
     targets: Array<{
       name: string;
+      targetType?: DeploymentTargetType;
       hostRef: string;
       composeFile: string;
       service: string;
       healthcheckUrl: string;
+      managedPort?: number | null;
+      managedRuntimeDir?: string | null;
+      managedDomain?: string | null;
     }>
   ): Promise<DeploymentTargetSummary[]> {
     for (const target of targets) {
       await this.pool.query(
         `
           INSERT INTO deployment_targets (
-            id, project_id, name, host_ref, compose_file, service, healthcheck_url
+            id,
+            project_id,
+            name,
+            target_type,
+            host_ref,
+            compose_file,
+            service,
+            healthcheck_url,
+            managed_port,
+            managed_runtime_dir,
+            managed_domain
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
           ON CONFLICT (project_id, name)
           DO UPDATE SET
+            target_type = EXCLUDED.target_type,
             host_ref = EXCLUDED.host_ref,
             compose_file = EXCLUDED.compose_file,
             service = EXCLUDED.service,
             healthcheck_url = EXCLUDED.healthcheck_url,
+            managed_port = EXCLUDED.managed_port,
+            managed_runtime_dir = EXCLUDED.managed_runtime_dir,
+            managed_domain = EXCLUDED.managed_domain,
             updated_at = NOW()
         `,
         [
           randomUUID(),
           projectId,
           target.name,
+          target.targetType ?? "ssh_compose",
           target.hostRef,
           target.composeFile,
           target.service,
-          target.healthcheckUrl
+          target.healthcheckUrl,
+          target.managedPort ?? null,
+          target.managedRuntimeDir ?? null,
+          target.managedDomain ?? null
         ]
       );
     }
@@ -1129,10 +1559,14 @@ export class AutoOpsDb {
           t.project_id,
           p.name AS project_name,
           t.name,
+          t.target_type,
           t.host_ref,
           t.compose_file,
           t.service,
           t.healthcheck_url,
+          t.managed_port,
+          t.managed_runtime_dir,
+          t.managed_domain,
           t.last_status,
           t.last_deployed_image,
           t.last_deployed_at,
@@ -1155,10 +1589,14 @@ export class AutoOpsDb {
           t.project_id,
           p.name AS project_name,
           t.name,
+          t.target_type,
           t.host_ref,
           t.compose_file,
           t.service,
           t.healthcheck_url,
+          t.managed_port,
+          t.managed_runtime_dir,
+          t.managed_domain,
           t.last_status,
           t.last_deployed_image,
           t.last_deployed_at,
@@ -1170,6 +1608,19 @@ export class AutoOpsDb {
       [targetId]
     );
     return result.rows[0] ? mapDeploymentTargetSummary(result.rows[0]) : null;
+  }
+
+  async reserveNextManagedPort(startPort = 6100): Promise<number> {
+    const result = await this.pool.query<{ next_port: number | string }>(
+      `
+        SELECT GREATEST(COALESCE(MAX(managed_port), 0) + 1, $1) AS next_port
+        FROM deployment_targets
+        WHERE target_type = 'managed_vps'
+      `,
+      [startPort]
+    );
+
+    return Number(result.rows[0]?.next_port ?? startPort);
   }
 
   async markDeploymentTargetStatus(input: {
@@ -1562,8 +2013,13 @@ function mapProjectSummary(row: ProjectRow): ProjectSummary {
     repoOwner: row.repo_owner,
     repoName: row.repo_name,
     installationId: Number(row.installation_id),
+    mode: row.mode,
+    githubRepoId: row.github_repo_id === null ? null : Number(row.github_repo_id),
     defaultBranch: row.default_branch,
     configPath: row.config_path,
+    appSlug: row.app_slug,
+    primaryUrl: row.primary_url,
+    managedConfig: row.generated_config,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     targetCount: row.target_count ?? 0,
@@ -1596,10 +2052,14 @@ function mapDeploymentTargetSummary(
     projectId: row.project_id,
     projectName: row.project_name,
     name: row.name,
+    targetType: row.target_type,
     hostRef: row.host_ref,
     composeFile: row.compose_file,
     service: row.service,
     healthcheckUrl: row.healthcheck_url,
+    managedPort: row.managed_port,
+    managedRuntimeDir: row.managed_runtime_dir,
+    managedDomain: row.managed_domain,
     lastStatus: row.last_status,
     lastDeployedImage: row.last_deployed_image,
     lastDeployedAt: row.last_deployed_at,
@@ -1632,7 +2092,36 @@ function mapInstallationSummary(
     installationId: Number(row.installation_id),
     accountLogin: row.account_login,
     accountType: row.account_type,
+    repoCount: Number(row.repo_count ?? 0),
+    syncStatus: row.sync_status,
+    lastSyncAt: row.last_sync_at,
+    lastSyncError: row.last_sync_error,
     updatedAt: row.updated_at
+  };
+}
+
+function mapGitHubRepositorySummary(
+  row: GitHubRepositoryRow
+): GitHubRepositorySummary {
+  return {
+    installationId: Number(row.installation_id),
+    repoId: Number(row.github_repo_id),
+    owner: row.owner,
+    name: row.name,
+    fullName: row.full_name,
+    defaultBranch: row.default_branch,
+    isPrivate: row.is_private,
+    isArchived: row.is_archived,
+    htmlUrl: row.html_url,
+    pushedAt: row.pushed_at,
+    analysisStatus: row.analysis_status,
+    deployabilityStatus: row.deployability_status,
+    deployabilityReason: row.deployability_reason,
+    detectedFramework: row.detected_framework,
+    packageManager: row.package_manager,
+    linkedProjectId: row.linked_project_id,
+    analyzedAt: row.analyzed_at,
+    syncedAt: row.synced_at
   };
 }
 

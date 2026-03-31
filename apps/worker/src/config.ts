@@ -6,7 +6,11 @@ const configSchema = z.object({
   GITHUB_APP_ID: z.string().default("0"),
   GITHUB_PRIVATE_KEY: z.string().default(""),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(3000),
-  RUNNER_TEMP_DIR: z.string().default("./tmp")
+  RUNNER_TEMP_DIR: z.string().default("./tmp"),
+  MANAGED_APPS_DIR: z.string().default("/opt/autoops-managed"),
+  MANAGED_BASE_DOMAIN: z.string().default(""),
+  MANAGED_EDGE_CONTAINER_NAME: z.string().default("autoops-caddy"),
+  MANAGED_NETWORK_NAME: z.string().default("autoops-managed")
 });
 
 export type WorkerConfig = ReturnType<typeof loadWorkerConfig>;
@@ -19,4 +23,3 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env) {
     GITHUB_PRIVATE_KEY: parsed.GITHUB_PRIVATE_KEY.replace(/\\n/g, "\n")
   };
 }
-

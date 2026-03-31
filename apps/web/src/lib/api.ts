@@ -4,6 +4,8 @@ import type {
   DeploymentRevisionSummary,
   DeploymentTargetDetail,
   DeploymentTargetSummary,
+  GitHubRepositoryFilters,
+  GitHubRepositorySummary,
   PipelineRunSummary,
   ProjectDetail,
   ProjectInstallationSummary,
@@ -46,7 +48,7 @@ export interface DeploymentsIndex {
   revisions: DeploymentRevisionSummary[];
 }
 
-function buildUrl(path: string, query?: Record<string, string | number | undefined>) {
+function buildUrl(path: string, query?: Record<string, string | number | boolean | undefined>) {
   const url = new URL(path, API_BASE_URL);
 
   for (const [key, value] of Object.entries(query ?? {})) {
@@ -63,7 +65,7 @@ async function fetchJson<T>(
   path: string,
   token?: string,
   init: RequestInit = {},
-  query?: Record<string, string | number | undefined>
+  query?: Record<string, string | number | boolean | undefined>
 ): Promise<T> {
   const response = await fetch(buildUrl(path, query), {
     ...init,
@@ -175,6 +177,43 @@ export function listGitHubInstallations(token: string) {
   );
 }
 
+export function syncGitHubInstallation(token: string, installationId: number) {
+  return fetchJson<{
+    installation: ProjectInstallationSummary | null;
+    repositories: GitHubRepositorySummary[];
+  }>(`/api/github/installations/${installationId}/sync`, token, {
+    method: "POST"
+  });
+}
+
+export function listGitHubRepositories(
+  token: string,
+  filters: GitHubRepositoryFilters = {}
+) {
+  return fetchJson<{ repositories: GitHubRepositorySummary[] }>(
+    "/api/github/repositories",
+    token,
+    {},
+    filters as Record<string, string | number | boolean | undefined>
+  );
+}
+
+export function importGitHubRepository(
+  token: string,
+  input: { installationId: number; repoId: number }
+) {
+  return fetchJson<{ project: ProjectSummary }>("/api/github/repositories/import", token, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
 export function getGitHubInstallUrl(token: string) {
   return fetchJson<{ url: string }>("/api/github/install-url", token);
+}
+
+export function deployManagedProject(token: string, projectId: string) {
+  return fetchJson<{ run: PipelineRunSummary }>(`/api/projects/${projectId}/deploy`, token, {
+    method: "POST"
+  });
 }

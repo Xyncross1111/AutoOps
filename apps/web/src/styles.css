@@ -653,7 +653,8 @@ code,
 }
 
 .project-card:hover,
-.activity-card:hover {
+.activity-card:hover,
+.repo-catalog-card:hover {
   transform: translateY(-2px);
 }
 
@@ -661,7 +662,8 @@ code,
 .activity-card p,
 .list-row p,
 .deployment-target-card p,
-.run-list-item p {
+.run-list-item p,
+.repo-catalog-card p {
   margin: 0;
   color: var(--text-muted);
 }
@@ -702,6 +704,38 @@ code,
   color: var(--text-muted);
 }
 
+.repo-catalog-list {
+  max-height: 56rem;
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.repo-catalog-card {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.9);
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.subtle-link {
+  background: rgba(255, 255, 255, 0.78);
+}
+
 .tag-list {
   display: flex;
   flex-wrap: wrap;
@@ -738,14 +772,17 @@ code,
 }
 
 .status-running,
-.status-processed {
+.status-processed,
+.status-syncing,
+.status-imported {
   color: var(--info);
   background: var(--info-soft);
   border-color: rgba(63, 103, 137, 0.2);
 }
 
 .status-queued,
-.status-pending {
+.status-pending,
+.status-deployable {
   color: var(--accent-strong);
   background: var(--accent-soft);
   border-color: rgba(142, 108, 47, 0.18);
@@ -755,7 +792,9 @@ code,
 .status-cancelled,
 .status-superseded,
 .status-unknown,
-.status-degraded {
+.status-degraded,
+.status-unsupported,
+.status-archived {
   color: var(--danger);
   background: var(--danger-soft);
   border-color: rgba(178, 74, 61, 0.2);

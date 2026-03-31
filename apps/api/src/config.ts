@@ -12,7 +12,9 @@ const configSchema = z.object({
   GITHUB_APP_ID: z.string().default("0"),
   GITHUB_APP_SLUG: z.string().default(""),
   GITHUB_PRIVATE_KEY: z.string().default(""),
-  GITHUB_WEBHOOK_SECRET: z.string().min(1)
+  GITHUB_WEBHOOK_SECRET: z.string().min(1),
+  MANAGED_APPS_DIR: z.string().default("/opt/autoops-managed"),
+  MANAGED_BASE_DOMAIN: z.string().default("")
 });
 
 export type ApiConfig = ReturnType<typeof loadApiConfig>;
@@ -25,4 +27,3 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env) {
     GITHUB_PRIVATE_KEY: parsed.GITHUB_PRIVATE_KEY.replace(/\\n/g, "\n")
   };
 }
-

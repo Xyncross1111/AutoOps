@@ -75,9 +75,9 @@ export function ProjectsPage() {
             <p className="eyebrow">Portfolio</p>
             <h3>Connected projects</h3>
           </div>
-          <Link className="button-link" to="/projects/new">
+          <Link className="button-link" to="/repositories">
             <FolderPlus size={16} />
-            <span>Register Project</span>
+            <span>Connect GitHub</span>
           </Link>
         </div>
 
@@ -103,9 +103,11 @@ export function ProjectsPage() {
                 {project.repoOwner}/{project.repoName}
               </p>
               <div className="project-meta-row">
+                <span>Mode: {project.mode === "managed_nextjs" ? "Managed Next.js" : "Custom pipeline"}</span>
                 <span>Branch: {project.defaultBranch}</span>
                 <span>Targets: {project.targetCount}</span>
               </div>
+              {project.primaryUrl ? <small>{project.primaryUrl}</small> : null}
               <small>Updated {formatDateTime(project.updatedAt)}</small>
               <span className="text-link">
                 Open workspace <ArrowRight size={14} />
@@ -113,13 +115,23 @@ export function ProjectsPage() {
             </Link>
           ))}
         </section>
+      ) : projects.length === 0 ? (
+        <EmptyState
+          title="No projects imported yet"
+          description="Connect GitHub, sync an installation, and import one of the visible repositories into AutoOps."
+          action={
+            <Link className="button-link" to="/repositories">
+              Connect GitHub
+            </Link>
+          }
+        />
       ) : (
         <EmptyState
           title="No projects match the current search"
-          description="Try another search term or register a new repository."
+          description="Try another search term or open the repository catalog to import another repo."
           action={
-            <Link className="button-link" to="/projects/new">
-              Register Project
+            <Link className="button-link" to="/repositories">
+              Open Repositories
             </Link>
           }
         />
