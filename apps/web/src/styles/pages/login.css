@@ -35,6 +35,11 @@
   font-weight: 600;
 }
 
+.ao-login__brand-mark {
+  width: 42px;
+  height: 42px;
+}
+
 .ao-login__lede {
   display: grid;
   gap: var(--space-3);

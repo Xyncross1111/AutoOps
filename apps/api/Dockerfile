@@ -1,10 +1,10 @@
 FROM node:21-bookworm-slim AS base
 WORKDIR /app
-COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/api/package.json ./apps/api/package.json
 COPY packages/core/package.json ./packages/core/package.json
 COPY packages/db/package.json ./packages/db/package.json
-RUN corepack enable && pnpm install --filter @autoops/api... --frozen-lockfile=false
+RUN corepack enable && pnpm install --filter @autoops/api... --frozen-lockfile
 
 COPY apps/api ./apps/api
 COPY packages/core ./packages/core

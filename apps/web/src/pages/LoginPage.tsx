@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
+import { BrandLogo } from "../components/BrandLogo";
 import { InlineError } from "../components/States";
 import { login, register } from "../lib/api";
 
@@ -55,7 +56,7 @@ export function LoginPage(props: {
       <div className="ao-login__frame">
         <aside className="ao-panel ao-login__aside">
           <div className="ao-login__brand">
-            <div className="ao-sidebar__brand-mark">AO</div>
+            <BrandLogo className="ao-sidebar__brand-mark ao-login__brand-mark" title="AutoOps" />
             <strong>AutoOps</strong>
           </div>
 

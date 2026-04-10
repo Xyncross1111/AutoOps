@@ -16,6 +16,8 @@ import {
 import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import { BrandLogo } from "./BrandLogo";
+
 const pageMeta: Record<string, { title: string; section: string }> = {
   "/": {
     title: "Overview",
@@ -105,7 +107,7 @@ export function AppShell(props: {
 
       <aside className={`ao-sidebar${isSidebarOpen ? " is-open" : ""}`}>
         <div className="ao-sidebar__brand">
-          <div className="ao-sidebar__brand-mark">AO</div>
+          <BrandLogo className="ao-sidebar__brand-mark" title="AutoOps" />
           <div>
             <h1>AutoOps</h1>
             <p>Control plane</p>

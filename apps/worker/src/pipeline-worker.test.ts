@@ -350,6 +350,8 @@ describe("PipelineWorker", () => {
       expect(dockerfile).toContain("pnpm ignored-builds");
       expect(dockerfile).toContain("pnpm.onlyBuiltDependencies");
       expect(dockerfile).toContain("pnpm rebuild --reporter append-only");
+      expect(dockerfile).not.toContain("then;");
+      expect(dockerfile).not.toContain("\nif pnpm help ignored-builds");
     } finally {
       rmSync(runtimeDir, { recursive: true, force: true });
       rmSync(repoDir, { recursive: true, force: true });
@@ -431,6 +433,8 @@ describe("PipelineWorker", () => {
       expect(dockerfile).toContain("corepack prepare pnpm@9.0.0 --activate");
       expect(dockerfile).toContain("pnpm install --store-dir /pnpm/store --frozen-lockfile");
       expect(dockerfile).toContain("pnpm ignored-builds");
+      expect(dockerfile).not.toContain("then;");
+      expect(dockerfile).not.toContain("\nif pnpm help ignored-builds");
       expect(dockerfile).toContain("RUN --mount=type=cache,target=/app/node_modules/.cache pnpm build");
       expect(dockerfile).toContain("FROM nginx:1.27-alpine");
       expect(dockerfile).toContain("COPY --from=build /app/dist /usr/share/nginx/html");

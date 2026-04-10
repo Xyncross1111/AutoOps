@@ -1052,10 +1052,10 @@ function buildManagedInstallInstruction(config: {
       : config.installCommand.replace(/^pnpm install\b/, "pnpm install --store-dir /pnpm/store");
     const allowBlockedBuildsScript = [
       "if pnpm help ignored-builds >/dev/null 2>&1; then",
-      "  blocked=$(pnpm ignored-builds | sed -n \"s/^  //p\" | grep -v \"^None$\" || true)",
-      "  if [ -n \"$blocked\" ]; then",
-      "    echo \"Approving blocked pnpm build scripts for: $blocked\"",
-      `    BLOCKED_BUILDS="$blocked" node -e "${escapeForDoubleQuotedShell(
+      "blocked=$(pnpm ignored-builds | sed -n \"s/^  //p\" | grep -v \"^None$\" || true);",
+      "if [ -n \"$blocked\" ]; then",
+      "echo \"Approving blocked pnpm build scripts for: $blocked\";",
+      `BLOCKED_BUILDS="$blocked" node -e "${escapeForDoubleQuotedShell(
         [
           "const fs = require('node:fs');",
           "const blocked = (process.env.BLOCKED_BUILDS ?? '').split(/\\n+/).map((value) => value.trim()).filter((value) => value.length > 0 && value !== 'None');",
@@ -1067,11 +1067,11 @@ function buildManagedInstallInstruction(config: {
           "pkg.pnpm = pnpm;",
           "fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\\n');"
         ].join(" ")
-      )}"`,
-      "    pnpm rebuild --reporter append-only",
-      "  fi",
+      )}";`,
+      "pnpm rebuild --reporter append-only;",
+      "fi;",
       "fi"
-    ].join("; ");
+    ].join(" ");
     return `RUN --mount=type=cache,target=/pnpm/store sh -lc '${escapeForSingleQuotedShell(`${command}; ${allowBlockedBuildsScript}`)}'`;
   }
 

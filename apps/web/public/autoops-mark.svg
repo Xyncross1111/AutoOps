@@ -1,0 +1,22 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="autoops-surface" x1="10" x2="54" y1="8" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#121821" />
+      <stop offset="1" stop-color="#1b2431" />
+    </linearGradient>
+    <linearGradient id="autoops-left" x1="17" x2="31" y1="45" y2="18" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#10b981" />
+      <stop offset="1" stop-color="#34d399" />
+    </linearGradient>
+    <linearGradient id="autoops-right" x1="33" x2="48" y1="47" y2="17" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fb7185" />
+      <stop offset="1" stop-color="#f59e0b" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="url(#autoops-surface)" />
+  <path d="M18 47L28.5 16.5C29.2 14.4 32.1 14.4 32.8 16.5L43 47H35.8L32.9 37.8H23.9L21 47H18Z" fill="url(#autoops-left)" />
+  <path d="M30.8 30.6H38.7C44.2 30.6 48 34.1 48 39.1C48 44.3 44 48 38.3 48H33.4V42.5H37.9C41.1 42.5 42.9 41.1 42.9 38.9C42.9 36.8 41.2 35.5 38.2 35.5H30.8V30.6Z" fill="url(#autoops-right)" />
+  <path d="M25.7 32.8H40.1" stroke="#f8fafc" stroke-linecap="round" stroke-opacity="0.9" stroke-width="3" />
+  <circle cx="46.5" cy="18" r="5.5" fill="#f8fafc" />
+  <circle cx="46.5" cy="18" r="2.5" fill="#0f172a" />
+</svg>
