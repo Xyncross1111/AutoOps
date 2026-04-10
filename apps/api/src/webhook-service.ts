@@ -5,7 +5,9 @@ import {
 } from "@autoops/core";
 import type { AutoOpsDb } from "@autoops/db";
 
+import type { ApiConfig } from "./config.js";
 import type { GitHubAppService } from "./github-app.js";
+import { ensureManagedDeploymentTarget } from "./managed-deployments.js";
 
 interface WebhookHeaders {
   deliveryId: string | undefined;
@@ -16,7 +18,8 @@ interface WebhookHeaders {
 export class GitHubWebhookService {
   constructor(
     private readonly db: AutoOpsDb,
-    private readonly github: GitHubAppService
+    private readonly github: GitHubAppService,
+    private readonly config: Pick<ApiConfig, "MANAGED_APPS_DIR" | "MANAGED_BASE_DOMAIN" | "WEB_BASE_URL">
   ) {}
 
   async handle(headers: WebhookHeaders, payload: Record<string, any>) {
@@ -100,6 +103,19 @@ export class GitHubWebhookService {
       };
     }
 
+    if (!ref.startsWith("refs/heads/") || payload.deleted === true || /^0+$/.test(commitSha)) {
+      await this.db.recordWebhookDelivery({
+        deliveryId,
+        eventName,
+        payload,
+        status: "ignored",
+        errorMessage: "Push event did not reference a live branch head."
+      });
+      return {
+        status: "ignored" as const
+      };
+    }
+
     const projects =
       typeof (this.db as AutoOpsDb & { listProjectsByRepo?: unknown }).listProjectsByRepo === "function"
         ? await this.db.listProjectsByRepo(repoOwner, repoName)
@@ -125,12 +141,12 @@ export class GitHubWebhookService {
 
     for (const project of projects) {
       if (project.mode === "managed_nextjs") {
-        if (branch !== project.defaultBranch) {
-          ignoredReason =
-            ignoredReason ??
-            `Branch ${branch} does not match the managed deployment branch ${project.defaultBranch}.`;
-          continue;
-        }
+        const managedTarget = await ensureManagedDeploymentTarget({
+          db: this.db,
+          config: this.config,
+          project,
+          branch
+        });
 
         const run = await this.db.createRun({
           projectId: project.id,
@@ -143,6 +159,12 @@ export class GitHubWebhookService {
             repoAccess: {
               type: "installation",
               installationId
+            },
+            managedDeployment: {
+              targetId: managedTarget.target.id,
+              targetName: managedTarget.target.name,
+              environment: managedTarget.environment,
+              targetUrl: managedTarget.url
             }
           }
         });

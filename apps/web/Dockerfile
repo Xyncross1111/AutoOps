@@ -1,6 +1,6 @@
 FROM node:21-bookworm-slim AS build
 WORKDIR /app
-ARG VITE_API_BASE_URL=http://localhost:4000
+ARG VITE_API_BASE_URL=
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/web/package.json ./apps/web/package.json

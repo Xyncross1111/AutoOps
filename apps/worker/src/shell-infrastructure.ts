@@ -26,6 +26,9 @@ export interface ExecutionInfrastructure {
     context: string;
     dockerfile: string;
     localTag: string;
+    buildEnvironment?: Record<string, string>;
+    baseImages?: string[];
+    maxAttempts?: number;
     onOutput?: (line: string) => Promise<void> | void;
   }): Promise<void>;
   runTestCommands(args: {
@@ -62,7 +65,9 @@ export interface ExecutionInfrastructure {
     service: string;
     imageTag: string;
     publicPort: number;
+    containerPort: number;
     networkName: string;
+    runtimeEnvironment?: Record<string, string>;
     managedDomain?: string | null;
     edgeContainerName?: string | null;
     onOutput?: (line: string) => Promise<void> | void;
@@ -87,13 +92,40 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
     await mkdir(resolve(args.baseTempDir), { recursive: true });
     const workdir = await mkdtemp(join(resolve(args.baseTempDir), "run-"));
     const remote = `https://x-access-token:${args.token}@github.com/${args.owner}/${args.repo}.git`;
-    await this.exec("git", ["clone", "--no-checkout", remote, workdir], {
-      onOutput: args.onOutput
-    });
-    await this.exec(
-      "git",
-      ["-C", workdir, "fetch", "--depth", "1", "origin", args.commitSha],
-      { onOutput: args.onOutput }
+    const cloneLabel = `git clone ${args.owner}/${args.repo}`;
+    const fetchLabel = `git fetch ${args.owner}/${args.repo}@${args.commitSha.slice(0, 12)}`;
+
+    await this.execWithRetry(
+      async () => {
+        await rm(workdir, { recursive: true, force: true });
+        await mkdir(workdir, { recursive: true });
+        await this.exec("git", ["clone", "--no-checkout", remote, workdir], {
+          onOutput: args.onOutput
+        });
+      },
+      {
+        label: cloneLabel,
+        maxAttempts: 3,
+        onOutput: args.onOutput,
+        shouldRetry: isTransientGitError,
+        retryDescription: "git/network error"
+      }
+    );
+    await this.execWithRetry(
+      async () => {
+        await this.exec(
+          "git",
+          ["-C", workdir, "fetch", "--depth", "1", "origin", args.commitSha],
+          { onOutput: args.onOutput }
+        );
+      },
+      {
+        label: fetchLabel,
+        maxAttempts: 3,
+        onOutput: args.onOutput,
+        shouldRetry: isTransientGitError,
+        retryDescription: "git/network error"
+      }
     );
     await this.exec(
       "git",
@@ -112,23 +144,84 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
     context: string;
     dockerfile: string;
     localTag: string;
+    buildEnvironment?: Record<string, string>;
+    baseImages?: string[];
+    maxAttempts?: number;
     onOutput?: (line: string) => Promise<void> | void;
   }): Promise<void> {
-    await this.exec(
-      "docker",
-      [
-        "build",
-        "-f",
-        args.dockerfile,
-        "-t",
-        args.localTag,
-        args.context
-      ],
-      {
-        cwd: args.workdir,
-        onOutput: args.onOutput
+    const maxAttempts = args.maxAttempts ?? 3;
+    const buildEnvironmentEntries = sortEnvironmentEntries(args.buildEnvironment);
+    let buildEnvironmentPath: string | null = null;
+
+    for (const baseImage of args.baseImages ?? []) {
+      await this.execWithRetry(
+        async () => {
+          await args.onOutput?.(`Pulling base image ${baseImage}.`);
+          await this.exec("docker", ["pull", baseImage], {
+            onOutput: args.onOutput
+          });
+        },
+        {
+          label: `docker pull ${baseImage}`,
+          maxAttempts,
+          onOutput: args.onOutput,
+          shouldRetry: isTransientContainerRegistryError,
+          retryDescription: "registry/network error"
+        }
+      );
+    }
+
+    try {
+      if (buildEnvironmentEntries.length > 0) {
+        buildEnvironmentPath = join(tmpdir(), `autoops-build-env-${randomUUID()}.sh`);
+        await writeFile(
+          buildEnvironmentPath,
+          buildEnvironmentEntries
+            .map(([name, value]) => `export ${name}=${shellQuote(value)}`)
+            .join("\n"),
+          "utf8"
+        );
+        await args.onOutput?.(
+          `Passing ${buildEnvironmentEntries.length} managed environment variable${
+            buildEnvironmentEntries.length === 1 ? "" : "s"
+          } into the image build.`
+        );
       }
-    );
+
+      await this.execWithRetry(
+        async () => {
+          const buildArgs = [
+            "build",
+            ...(buildEnvironmentPath
+              ? ["--secret", `id=autoops_build_env,src=${buildEnvironmentPath}`]
+              : []),
+            "-f",
+            args.dockerfile,
+            "-t",
+            args.localTag,
+            args.context
+          ];
+          await this.exec("docker", buildArgs, {
+            cwd: args.workdir,
+            env: {
+              DOCKER_BUILDKIT: "1"
+            },
+            onOutput: args.onOutput
+          });
+        },
+        {
+          label: `docker build ${args.localTag}`,
+          maxAttempts,
+          onOutput: args.onOutput,
+          shouldRetry: isTransientContainerRegistryError,
+          retryDescription: "registry/network error"
+        }
+      );
+    } finally {
+      if (buildEnvironmentPath) {
+        await rm(buildEnvironmentPath, { force: true });
+      }
+    }
   }
 
   async runTestCommands(args: {
@@ -284,11 +377,15 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
     service: string;
     imageTag: string;
     publicPort: number;
+    containerPort: number;
     networkName: string;
+    runtimeEnvironment?: Record<string, string>;
     managedDomain?: string | null;
     edgeContainerName?: string | null;
     onOutput?: (line: string) => Promise<void> | void;
   }): Promise<void> {
+    const runtimeEnvironmentLines = buildComposeEnvironmentLines(args.runtimeEnvironment);
+
     await mkdir(args.runtimeDir, { recursive: true });
     await this.ensureDockerNetwork(args.networkName, args.onOutput);
     await writeFile(
@@ -299,12 +396,9 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
         `    container_name: autoops-${args.appSlug}`,
         `    image: ${args.imageTag}`,
         "    restart: unless-stopped",
-        "    environment:",
-        '      NODE_ENV: "production"',
-        '      HOSTNAME: "0.0.0.0"',
-        '      PORT: "3000"',
         "    ports:",
-        `      - \"${args.publicPort}:3000\"`,
+        `      - \"${args.publicPort}:${args.containerPort}\"`,
+        ...runtimeEnvironmentLines,
         "    networks:",
         `      ${args.networkName}:`,
         "        aliases:",
@@ -338,7 +432,7 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
         snippetPath,
         [
           `${args.managedDomain} {`,
-          `  reverse_proxy ${args.appSlug}:3000`,
+          `  reverse_proxy ${args.appSlug}:${args.containerPort}`,
           "}"
         ].join("\n"),
         "utf8"
@@ -414,6 +508,38 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
     }
   }
 
+  private async execWithRetry(
+    action: () => Promise<void>,
+    args: {
+      label: string;
+      maxAttempts: number;
+      onOutput?: (line: string) => Promise<void> | void;
+      shouldRetry: (message: string) => boolean;
+      retryDescription: string;
+    }
+  ): Promise<void> {
+    let attempt = 0;
+
+    while (attempt < args.maxAttempts) {
+      attempt += 1;
+      try {
+        await action();
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const shouldRetry = attempt < args.maxAttempts && args.shouldRetry(message);
+        if (!shouldRetry) {
+          throw error;
+        }
+
+        await args.onOutput?.(
+          `${args.label} hit a transient ${args.retryDescription}. Retrying (${attempt + 1}/${args.maxAttempts})...`
+        );
+        await sleep(attempt * 2000);
+      }
+    }
+  }
+
   private async exec(
     command: string,
     args: string[],
@@ -479,6 +605,56 @@ export class ShellExecutionInfrastructure implements ExecutionInfrastructure {
   }
 }
 
+function isTransientContainerRegistryError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return [
+    "failed to authorize",
+    "network is unreachable",
+    "tls handshake timeout",
+    "i/o timeout",
+    "temporary failure",
+    "timeout",
+    "connection reset by peer"
+  ].some((fragment) => normalized.includes(fragment));
+}
+
+function isTransientGitError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return [
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "connection timed out",
+    "operation timed out",
+    "failed to connect",
+    "connection reset by peer",
+    "tls handshake timeout",
+    "http/2 stream",
+    "the remote end hung up unexpectedly"
+  ].some((fragment) => normalized.includes(fragment));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function sortEnvironmentEntries(environment?: Record<string, string>) {
+  return Object.entries(environment ?? {}).sort(([left], [right]) => left.localeCompare(right));
+}
+
+function buildComposeEnvironmentLines(environment?: Record<string, string>) {
+  const entries = sortEnvironmentEntries(environment);
+
+  if (entries.length === 0) {
+    return [];
+  }
+
+  return [
+    "    environment:",
+    ...entries.map(([name, value]) => `      ${JSON.stringify(name)}: ${JSON.stringify(value)}`)
+  ];
 }

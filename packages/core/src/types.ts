@@ -13,11 +13,18 @@ export type StageStatus =
   | "failed"
   | "skipped";
 
-export type RunSource = "push" | "rerun" | "manual_rollback" | "manual_deploy";
+export type RunSource =
+  | "push"
+  | "rerun"
+  | "manual_rollback"
+  | "manual_deploy"
+  | "manual_promotion";
 
 export type ProjectMode = "custom_pipeline" | "managed_nextjs";
 
 export type DeploymentTargetType = "ssh_compose" | "managed_vps";
+export type DeploymentEnvironment = "preview" | "staging" | "production" | "custom";
+export type PromotionApprovalStatus = "pending" | "approved" | "rejected";
 
 export type GitHubRepoAnalysisStatus = "pending" | "analyzed" | "failed";
 
@@ -28,16 +35,30 @@ export type GitHubRepoDeployabilityStatus =
   | "archived";
 
 export type ManagedAppPackageManager = "npm" | "pnpm" | "yarn";
+export type ManagedAppFramework =
+  | "nextjs"
+  | "nuxt"
+  | "express"
+  | "nestjs"
+  | "react"
+  | "react_cra"
+  | "vue"
+  | "astro"
+  | "static_html";
 
-export interface ManagedNextjsConfig {
-  framework: "nextjs";
-  packageManager: ManagedAppPackageManager;
-  installCommand: string;
-  buildCommand: string;
-  startCommand: string;
-  nodeVersion: string;
+export interface ManagedAppConfig {
+  framework: ManagedAppFramework;
+  packageManager: ManagedAppPackageManager | null;
+  packageManagerVersion?: string | null;
+  installCommand: string | null;
+  buildCommand: string | null;
+  startCommand: string | null;
+  nodeVersion: string | null;
   outputPort: number;
+  outputDirectory: string | null;
 }
+
+export type ManagedNextjsConfig = ManagedAppConfig;
 
 export interface PipelineHealthcheck {
   url: string;
@@ -50,6 +71,9 @@ export interface PipelineTarget {
   composeFile: string;
   service: string;
   healthcheck: PipelineHealthcheck;
+  environment?: DeploymentEnvironment;
+  promotionOrder?: number;
+  protected?: boolean;
 }
 
 export interface PipelineConfig {
@@ -84,7 +108,7 @@ export interface ProjectSummary {
   configPath: string;
   appSlug: string | null;
   primaryUrl: string | null;
-  managedConfig: ManagedNextjsConfig | null;
+  managedConfig: ManagedAppConfig | null;
   createdAt: string;
   updatedAt: string;
   targetCount: number;
@@ -131,6 +155,9 @@ export interface DeploymentTargetSummary {
   projectName: string;
   name: string;
   targetType: DeploymentTargetType;
+  environment: DeploymentEnvironment | null;
+  promotionOrder: number | null;
+  protected: boolean;
   hostRef: string;
   composeFile: string;
   service: string;
@@ -151,11 +178,17 @@ export interface DeploymentRevisionSummary {
   projectId: string;
   projectName: string;
   runId: string | null;
+  runSource: RunSource | null;
   imageRef: string;
   imageDigest: string;
   status: string;
   deployedAt: string;
   rollbackOfRevisionId: string | null;
+  promotedFromRevisionId: string | null;
+  promotedFromTargetId: string | null;
+  promotedFromTargetName: string | null;
+  promotionApprovalId: string | null;
+  promotionApprovalStatus: PromotionApprovalStatus | null;
 }
 
 export interface RollbackRequest {
@@ -180,17 +213,57 @@ export interface ManualRollbackMetadata {
   initiatedBy: string;
 }
 
+export interface ManualPromotionMetadata {
+  sourceRevisionId: string;
+  sourceTargetId: string;
+  destinationTargetId: string;
+  requestedBy: string;
+  approvalId?: string | null;
+  imageRef: string;
+  imageDigest: string;
+}
+
 export interface RunRepositoryAccessMetadata {
   type: "installation" | "oauth";
   installationId?: number;
   actorEmail?: string;
 }
 
+export interface ManagedDeploymentMetadata {
+  targetId: string;
+  targetName: string;
+  environment: "production" | "preview";
+  targetUrl?: string | null;
+}
+
 export interface QueuedRunMetadata {
   pipelineConfig?: PipelineConfig;
   deliveryId?: string;
   manualRollback?: ManualRollbackMetadata;
+  manualPromotion?: ManualPromotionMetadata;
   repoAccess?: RunRepositoryAccessMetadata;
+  managedDeployment?: ManagedDeploymentMetadata;
+}
+
+export interface PromotionApprovalSummary {
+  id: string;
+  projectId: string;
+  projectName: string;
+  sourceRevisionId: string;
+  sourceTargetId: string;
+  sourceTargetName: string;
+  destinationTargetId: string;
+  destinationTargetName: string;
+  sourceImageRef: string;
+  sourceImageDigest: string;
+  requestedBy: string;
+  decidedBy: string | null;
+  requestComment: string | null;
+  decisionComment: string | null;
+  status: PromotionApprovalStatus;
+  queuedRunId: string | null;
+  createdAt: string;
+  decidedAt: string | null;
 }
 
 export interface ProjectInstallationSummary {
@@ -210,6 +283,7 @@ export interface GitHubRepositorySummary {
   owner: string;
   name: string;
   fullName: string;
+  description: string | null;
   defaultBranch: string;
   isPrivate: boolean;
   isArchived: boolean;
@@ -315,11 +389,13 @@ export interface DashboardOverview {
     runningRunCount: number;
     successRate7d: number;
     unhealthyTargetCount: number;
+    pendingApprovalCount: number;
   };
   attention: {
     latestFailedRun: PipelineRunSummary | null;
     activeRuns: PipelineRunSummary[];
     unhealthyTargets: DeploymentTargetSummary[];
+    pendingApprovals: PromotionApprovalSummary[];
   };
   recentRuns: PipelineRunSummary[];
   recentDeployments: DeploymentRevisionSummary[];

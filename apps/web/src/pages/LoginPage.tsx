@@ -1,5 +1,13 @@
 import { FormEvent, useState } from "react";
-import { LockKeyhole, Sparkles } from "lucide-react";
+import {
+  ArrowRight,
+  CheckCircle2,
+  FolderGit2,
+  LockKeyhole,
+  Rocket,
+  ShieldCheck,
+  TerminalSquare
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { InlineError } from "../components/States";
@@ -43,40 +51,117 @@ export function LoginPage(props: {
   }
 
   return (
-    <div className="login-page">
-      <div className="login-hero">
-        <p className="eyebrow">Self-hosted CI/CD, elevated</p>
-        <h1>AutoOps feels like a premium control room now.</h1>
-        <p>
-          Monitor delivery posture, investigate failures, and manage deployment operations
-          from a calmer, sharper interface.
-        </p>
-        <div className="login-feature-list">
-          <div className="feature-pill">
-            <Sparkles size={16} />
-            <span>Executive overview</span>
+    <div className="ao-login">
+      <div className="ao-login__frame">
+        <aside className="ao-panel ao-login__aside">
+          <div className="ao-login__brand">
+            <div className="ao-sidebar__brand-mark">AO</div>
+            <strong>AutoOps</strong>
           </div>
-          <div className="feature-pill">
-            <LockKeyhole size={16} />
-            <span>Protected operator workspace</span>
+
+          <div className="ao-login__lede">
+            <p className="ao-page-header__eyebrow">Welcome</p>
+            <h1>Ship reliable pipelines from day one.</h1>
+            <p className="ao-muted">
+              AutoOps gives operators a clean control plane for GitHub workflows,
+              environment-aware deployments, and rapid rollback when things go sideways.
+            </p>
           </div>
-        </div>
-      </div>
 
-      <form className="login-card" onSubmit={handleSubmit}>
-        <div className="card-frame">
-          <p className="eyebrow">Operator access</p>
-          <h2>{mode === "login" ? "Sign in to AutoOps" : "Create your AutoOps account"}</h2>
-          <p className="muted-copy">
-            {mode === "login"
-              ? "Sign in with your AutoOps account to access your projects and connected GitHub workspace."
-              : "Create a personal AutoOps login, then connect your own GitHub account and import repositories."}
-          </p>
+          <div className="ao-login__stats ao-panel ao-panel--inset">
+            <dl>
+              <div>
+                <dt>Use case</dt>
+                <dd>Automated deployments, run visibility, release approvals</dd>
+              </div>
+              <div>
+                <dt>Target users</dt>
+                <dd>Platform teams, operations crews, and self-hosted projects</dd>
+              </div>
+              <div>
+                <dt>Default setup</dt>
+                <dd>Quick start in under 10 minutes</dd>
+              </div>
+            </dl>
+          </div>
 
-          <div className="auth-mode-toggle">
+          <div className="ao-panel ao-panel--inset ao-login__steps">
+            <p className="ao-section-header__eyebrow">Get started in 3 steps</p>
+            <ol>
+              <li>
+                <span>1</span>
+                <div>
+                  <strong>Sign in or create account</strong>
+                  <p>Use a simple email and password to unlock the workspace.</p>
+                </div>
+              </li>
+              <li>
+                <span>2</span>
+                <div>
+                  <strong>Connect GitHub repositories</strong>
+                  <p>Import projects and map your target environments.</p>
+                </div>
+              </li>
+              <li>
+                <span>3</span>
+                <div>
+                  <strong>Monitor, approve, and recover</strong>
+                  <p>Track live runs, approvals, and rollback safely.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+
+          <div className="ao-login__bullets">
+            <div className="ao-panel ao-panel--inset ao-login__bullet">
+              <FolderGit2 size={16} />
+              <div>
+                <strong>Connect GitHub</strong>
+                <p>Discover the repositories your account can access.</p>
+              </div>
+            </div>
+            <div className="ao-panel ao-panel--inset ao-login__bullet">
+              <Rocket size={16} />
+              <div>
+                <strong>Deploy and roll back</strong>
+                <p>Manage revisions, targets, and recovery actions from the dashboard.</p>
+              </div>
+            </div>
+            <div className="ao-panel ao-panel--inset ao-login__bullet">
+              <TerminalSquare size={16} />
+              <div>
+                <strong>Inspect live logs</strong>
+                <p>Follow runs and deployments with readable streaming output.</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="ao-inline-meta">
+            <span className="ao-chip"><ShieldCheck size={14} /> Production-safe workflow</span>
+            <span className="ao-chip"><CheckCircle2 size={14} /> Role-ready by design</span>
+            <span className="ao-chip"><Rocket size={14} /> Fast onboarding</span>
+          </div>
+        </aside>
+
+        <form className="ao-panel ao-login__card" onSubmit={handleSubmit}>
+          <div className="ao-stack ao-stack--sm">
+            <p className="ao-page-header__eyebrow">Account</p>
+            <h2>
+              {mode === "login" ? "Sign in to your workspace" : "Create your AutoOps account"}
+            </h2>
+            <p className="ao-muted">
+              {mode === "login"
+                ? "Use your AutoOps credentials to access your repositories, projects, and deployment history."
+                : "Create a user account for this AutoOps instance. GitHub is connected after you sign in."}
+            </p>
+          </div>
+
+          <div className="ao-login__tabs">
             <button
               type="button"
-              className={mode === "login" ? "secondary" : "ghost"}
+              className={`ao-button ${
+                mode === "login" ? "ao-button--primary" : "ao-button--secondary"
+              }`}
               onClick={() => {
                 setMode("login");
                 setError("");
@@ -86,7 +171,9 @@ export function LoginPage(props: {
             </button>
             <button
               type="button"
-              className={mode === "register" ? "secondary" : "ghost"}
+              className={`ao-button ${
+                mode === "register" ? "ao-button--primary" : "ao-button--secondary"
+              }`}
               onClick={() => {
                 setMode("register");
                 setError("");
@@ -119,7 +206,7 @@ export function LoginPage(props: {
             />
           </label>
 
-          <button type="submit" disabled={isSubmitting}>
+          <button className="ao-button ao-button--primary ao-login__submit" type="submit" disabled={isSubmitting}>
             {isSubmitting
               ? mode === "login"
                 ? "Signing In..."
@@ -130,8 +217,34 @@ export function LoginPage(props: {
           </button>
 
           {error ? <InlineError message={error} /> : null}
-        </div>
-      </form>
+
+          <div className="ao-inline-meta ao-muted">
+            <LockKeyhole size={14} />
+            <span>
+              Want an account? Switch to <strong>Create Account</strong>. GitHub connections live in Repositories.
+            </span>
+          </div>
+
+          <button
+            className="ao-link-button ao-link-button--secondary"
+            onClick={() => {
+              setMode(mode === "login" ? "register" : "login");
+              setError("");
+            }}
+            type="button"
+          >
+            {mode === "login" ? (
+              <>
+                Explore onboarding for new teams <ArrowRight size={14} />
+              </>
+            ) : (
+              <>
+                Go back to sign-in <ArrowRight size={14} />
+              </>
+            )}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

@@ -1,0 +1,90 @@
+.ao-state {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.ao-state h3,
+.ao-state p {
+  margin: 0;
+}
+
+.ao-state h3 {
+  font-size: var(--text-lg);
+  line-height: 1.3333;
+}
+
+.ao-state p {
+  color: var(--text-3);
+}
+
+.ao-state__action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.ao-state__skeleton {
+  width: 180px;
+}
+
+.ao-state__skeleton--short {
+  width: 110px;
+}
+
+.ao-inline-message {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.ao-inline-message strong {
+  font-size: var(--text-sm);
+}
+
+.ao-inline-message span {
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.ao-inline-message--error {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-default));
+  background: color-mix(in srgb, var(--danger-soft) 60%, var(--surface-1));
+}
+
+.ao-inline-message:not(.ao-inline-message--error) {
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border-default));
+  background: color-mix(in srgb, var(--accent-soft-2) 72%, var(--surface-1));
+}
+
+.ao-skeleton {
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--surface-3) 0%,
+    color-mix(in srgb, var(--surface-4) 70%, transparent) 50%,
+    var(--surface-3) 100%
+  );
+  background-size: 200% 100%;
+  animation: ao-skeleton 1.3s ease-in-out infinite;
+}
+
+.ao-skeleton--line {
+  height: 12px;
+}
+
+@keyframes ao-skeleton {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}

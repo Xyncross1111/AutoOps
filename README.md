@@ -26,6 +26,21 @@ AutoOps is a self-hosted CI/CD platform MVP for GitHub repositories. Phase 1 inc
    - `pnpm dev:worker`
    - `pnpm dev:web`
 
+## Faster Builds
+
+This workspace now uses Turborepo for `build`, `test`, and `typecheck`.
+
+- `pnpm build` runs a dependency-aware task graph instead of a plain recursive loop
+- repeat builds restore package outputs from `.turbo/cache`
+- unchanged packages are skipped automatically
+
+For shared cache hits in CI or across machines, you can enable Vercel Remote Cache:
+
+1. `npx turbo login`
+2. `npx turbo link`
+
+After that, `pnpm build`, `pnpm test`, and `pnpm typecheck` can reuse cached artifacts across developers and CI jobs.
+
 ## Project Secrets
 
 Project secrets are stored encrypted in Postgres. Phase 1 expects these secret names:

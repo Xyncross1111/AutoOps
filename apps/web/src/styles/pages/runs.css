@@ -1,0 +1,42 @@
+.ao-runs {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ao-run-list {
+  overflow: auto;
+}
+
+.ao-run-list .ao-ledger__row {
+  cursor: pointer;
+}
+
+.ao-run-list .ao-ledger__row strong,
+.ao-run-list .ao-ledger__row p {
+  margin: 0;
+}
+
+.ao-run-list .ao-ledger__row p {
+  color: var(--text-3);
+}
+
+.ao-timeline {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ao-timeline__item {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.ao-timeline__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}

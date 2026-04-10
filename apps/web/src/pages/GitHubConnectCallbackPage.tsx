@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { useAppSession } from "../app-context";
+import { PageHeader } from "../components/PageHeader";
 import { EmptyState, LoadingBlock } from "../components/States";
 import { completeGitHubOAuth, syncGitHubInstallation } from "../lib/api";
 
@@ -92,23 +93,35 @@ export function GitHubConnectCallbackPage() {
 
   if (error) {
     return (
-      <EmptyState
-        title="GitHub connection did not complete"
-        description={error}
-        action={
-          <Link className="button-link" to="/repositories">
-            Back to repositories
-          </Link>
-        }
-      />
+      <div className="ao-page">
+        <PageHeader
+          eyebrow="Integrations / Callback"
+          title="GitHub connection did not complete"
+          description={error}
+        />
+        <EmptyState
+          title="Connection failed"
+          description="Review the message above, then return to the repository console and try again."
+          action={
+            <Link className="ao-link-button ao-link-button--primary" to="/repositories">
+              Back to repositories
+            </Link>
+          }
+        />
+      </div>
     );
   }
 
   return (
-    <div className="page-stack">
-      <div className="success-banner">
+    <div className="ao-page">
+      <PageHeader
+        eyebrow="Integrations / Callback"
+        title="Finishing GitHub connection"
+        description="AutoOps is finalizing the GitHub handshake and refreshing the repository console."
+      />
+      <div className="ao-inline-message">
         <strong>GitHub is connected</strong>
-        <span>AutoOps is finalizing the GitHub connection and loading repositories.</span>
+        <span>AutoOps is loading the latest repository data now.</span>
       </div>
       <LoadingBlock label="Finishing GitHub connection..." />
     </div>

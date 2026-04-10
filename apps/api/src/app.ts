@@ -3,7 +3,14 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 
-import { decryptSecret, encryptSecret, verifyGitHubSignature } from "@autoops/core";
+import {
+  decryptSecret,
+  encryptSecret,
+  verifyGitHubSignature,
+  type DeploymentRevisionSummary,
+  type DeploymentTargetSummary,
+  type PipelineRunSummary
+} from "@autoops/core";
 import type { AutoOpsDb } from "@autoops/db";
 
 import {
@@ -15,7 +22,19 @@ import {
 } from "./auth.js";
 import type { ApiConfig } from "./config.js";
 import type { GitHubAppService } from "./github-app.js";
-import { analyzeRepository, buildManagedNextjsConfig } from "./repo-analysis.js";
+import {
+  analyzeRepository,
+  buildManagedNodeServerConfig,
+  buildManagedNextjsConfig,
+  buildManagedReactConfig,
+  buildManagedStaticFrameworkConfig,
+  buildManagedStaticHtmlConfig
+} from "./repo-analysis.js";
+import {
+  buildManagedTargetDefinition,
+  createManagedAppSlug,
+  ensureManagedDeploymentTarget
+} from "./managed-deployments.js";
 import { GitHubWebhookService } from "./webhook-service.js";
 
 interface RawBodyRequest extends AuthenticatedRequest {
@@ -49,12 +68,32 @@ const rollbackSchema = z.object({
   revisionId: z.string().uuid()
 });
 
+const promotionSchema = z.object({
+  sourceRevisionId: z.string().uuid(),
+  destinationTargetId: z.string().uuid(),
+  comment: z.string().trim().max(2_000).optional()
+});
+
+const approvalDecisionSchema = z.object({
+  comment: z.string().trim().max(2_000).optional()
+});
+
+const deployProjectSchema = z.object({
+  branch: z.string().trim().min(1).optional()
+});
+
 const runFiltersSchema = z.object({
   projectId: z.string().uuid().optional(),
   status: z.enum(["queued", "running", "succeeded", "failed", "cancelled", "superseded"]).optional(),
-  source: z.enum(["push", "rerun", "manual_rollback", "manual_deploy"]).optional(),
+  source: z.enum(["push", "rerun", "manual_rollback", "manual_deploy", "manual_promotion"]).optional(),
   search: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().positive().max(250).default(100)
+});
+
+const approvalFiltersSchema = z.object({
+  projectId: z.string().uuid().optional(),
+  status: z.enum(["pending", "approved", "rejected"]).optional(),
+  limit: z.coerce.number().int().positive().max(250).default(50)
 });
 
 const activityQuerySchema = z.object({
@@ -97,7 +136,7 @@ export function createApp(args: {
 }) {
   const { config, db, github } = args;
   const auth = createAuthHelpers(config);
-  const webhookService = new GitHubWebhookService(db, github);
+  const webhookService = new GitHubWebhookService(db, github, config);
 
   const app = express();
   const asyncRoute =
@@ -486,12 +525,19 @@ export function createApp(args: {
         res.status(409).json({ error: "This repository has already been imported." });
         return;
       }
-      if (repository.deployabilityStatus !== "deployable" || !repository.packageManager) {
+      if (repository.deployabilityStatus !== "deployable" || !repository.detectedFramework) {
         res.status(400).json({ error: "This repository is not eligible for managed import." });
         return;
       }
 
-      managedConfig = buildManagedProjectConfig(repository.packageManager);
+      managedConfig = buildManagedProjectConfig(
+        repository.detectedFramework,
+        repository.packageManager
+      );
+      if (!managedConfig) {
+        res.status(400).json({ error: "This repository is not eligible for managed import." });
+        return;
+      }
       projectInstallationId = repository.installationId;
       accessMode = "installation";
     } else {
@@ -546,22 +592,19 @@ export function createApp(args: {
       });
     }
 
-    const managedPort = await db.reserveNextManagedPort();
     const appSlug = createManagedAppSlug(
       `${parsed.data.owner}/${parsed.data.name}`,
       parsed.data.repoId
     );
-    const primaryUrl =
-      buildManagedPrimaryUrl({
-        baseDomain: config.MANAGED_BASE_DOMAIN,
-        webBaseUrl: config.WEB_BASE_URL,
-        appSlug,
-        port: managedPort
-      }) ?? null;
-    const managedDomain = config.MANAGED_BASE_DOMAIN
-      ? `${appSlug}.${config.MANAGED_BASE_DOMAIN}`
-      : null;
-    const runtimeDir = `${trimTrailingSlash(config.MANAGED_APPS_DIR)}/apps/${appSlug}`;
+    const managedPort = await db.reserveNextManagedPort();
+    const productionTarget = buildManagedTargetDefinition({
+      config,
+      baseAppSlug: appSlug,
+      defaultBranch: parsed.data.defaultBranch,
+      branch: parsed.data.defaultBranch,
+      outputPort: managedConfig.outputPort,
+      managedPort
+    });
     const project = await db.createProject({
       ownerEmail: req.user.email,
       name: parsed.data.name,
@@ -573,23 +616,11 @@ export function createApp(args: {
       defaultBranch: parsed.data.defaultBranch,
       configPath: ".autoops/pipeline.yml",
       appSlug,
-      primaryUrl,
+      primaryUrl: productionTarget.url,
       managedConfig
     });
 
-    await db.syncDeploymentTargets(project.id, [
-      {
-        name: "managed-vps",
-        targetType: "managed_vps",
-        hostRef: "managed",
-        composeFile: `${runtimeDir}/docker-compose.yml`,
-        service: "app",
-        healthcheckUrl: `http://${appSlug}:3000/`,
-        managedPort,
-        managedRuntimeDir: runtimeDir,
-        managedDomain
-      }
-    ]);
+    await db.syncDeploymentTargets(project.id, [productionTarget.target]);
     if (repository) {
       await db.linkGitHubRepositoryToProject(repository.installationId, repository.repoId, project.id);
     }
@@ -703,17 +734,56 @@ export function createApp(args: {
     res.json({ project });
   }));
 
+  app.delete("/api/projects/:id", asyncRoute(async (req, res) => {
+    const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const project = await db.deleteProject(projectId, req.user?.email);
+
+    if (!project) {
+      res.status(404).json({ error: "Project not found." });
+      return;
+    }
+
+    await db.writeAuditLog(
+      req.user?.email ?? "unknown",
+      "project.deleted",
+      "project",
+      project.id,
+      {
+        projectId: project.id,
+        projectName: project.name,
+        repoOwner: project.repoOwner,
+        repoName: project.repoName
+      }
+    );
+
+    res.json({ project });
+  }));
+
   app.post("/api/projects/:id/deploy", asyncRoute(async (req, res) => {
     const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const parsed = deployProjectSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
     const project = await db.getProject(projectId, req.user?.email);
     if (!project) {
       res.status(404).json({ error: "Project not found." });
       return;
     }
     if (project.mode !== "managed_nextjs") {
-      res.status(400).json({ error: "Manual deploy is only available for managed Next.js projects." });
+      res.status(400).json({ error: "Manual deploy is only available for managed imported projects." });
       return;
     }
+
+    const branch = parsed.data.branch ?? project.defaultBranch;
+    const managedTarget = await ensureManagedDeploymentTarget({
+      db,
+      config,
+      project,
+      branch,
+      ownerEmail: req.user?.email
+    });
 
     let commitSha = "";
     let repoAccess: { type: "installation"; installationId: number } | { type: "oauth"; actorEmail: string };
@@ -723,7 +793,7 @@ export function createApp(args: {
         installationId: project.installationId,
         owner: project.repoOwner,
         repo: project.repoName,
-        branch: project.defaultBranch
+        branch
       });
       repoAccess = {
         type: "installation",
@@ -748,7 +818,7 @@ export function createApp(args: {
       commitSha = await github.getBranchHeadShaWithOAuth({
         owner: project.repoOwner,
         repo: project.repoName,
-        branch: project.defaultBranch,
+        branch,
         accessToken
       });
       repoAccess = {
@@ -760,14 +830,20 @@ export function createApp(args: {
     const run = await db.createRun({
       projectId,
       source: "manual_deploy",
-      branch: project.defaultBranch,
+      branch,
       commitSha,
       triggeredBy: req.user?.email ?? "unknown",
       metadata: {
-        repoAccess
+        repoAccess,
+        managedDeployment: {
+          targetId: managedTarget.target.id,
+          targetName: managedTarget.target.name,
+          environment: managedTarget.environment,
+          targetUrl: managedTarget.url
+        }
       }
     });
-    await db.supersedeQueuedRuns(projectId, project.defaultBranch, run.id);
+    await db.supersedeQueuedRuns(projectId, branch, run.id);
     await db.writeAuditLog(
       req.user?.email ?? "unknown",
       "run.manual_deploy",
@@ -775,12 +851,15 @@ export function createApp(args: {
       run.id,
       {
         projectId,
-        branch: project.defaultBranch,
-        commitSha
+        branch,
+        commitSha,
+        environment: managedTarget.environment,
+        targetId: managedTarget.target.id,
+        targetName: managedTarget.target.name
       }
     );
 
-    res.status(202).json({ run });
+    res.status(202).json({ run, target: managedTarget.target });
   }));
 
   app.get("/api/runs", asyncRoute(async (req, res) => {
@@ -880,6 +959,222 @@ export function createApp(args: {
       return;
     }
     res.json(detail);
+  }));
+
+  app.post("/api/promotions", asyncRoute(async (req, res) => {
+    const parsed = promotionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    const actor = req.user?.email ?? "unknown";
+    let context;
+    try {
+      context = await resolvePromotionContext({
+        db,
+        sourceRevisionId: parsed.data.sourceRevisionId,
+        destinationTargetId: parsed.data.destinationTargetId,
+        ownerEmail: req.user?.email
+      });
+    } catch (error) {
+      if (error instanceof PromotionValidationError) {
+        res.status(error.statusCode).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+
+    const pendingApproval = await db.findPendingPromotionApproval(
+      context.sourceRevision.id,
+      context.destinationTarget.id,
+      req.user?.email
+    );
+    if (pendingApproval) {
+      res.status(409).json({ error: "A pending approval already exists for this promotion." });
+      return;
+    }
+
+    await db.writeAuditLog(
+      actor,
+      "promotion.requested",
+      "deployment_revision",
+      context.sourceRevision.id,
+      {
+        projectId: context.sourceRevision.projectId,
+        sourceTargetId: context.sourceTarget.id,
+        destinationTargetId: context.destinationTarget.id,
+        imageDigest: context.sourceRevision.imageDigest
+      }
+    );
+
+    if (context.destinationTarget.protected) {
+      const approval = await db.createPromotionApproval({
+        projectId: context.sourceRevision.projectId,
+        sourceRevisionId: context.sourceRevision.id,
+        sourceTargetId: context.sourceTarget.id,
+        destinationTargetId: context.destinationTarget.id,
+        sourceImageRef: context.sourceRevision.imageRef,
+        sourceImageDigest: context.sourceRevision.imageDigest,
+        requestedBy: actor,
+        requestComment: parsed.data.comment ?? null
+      });
+
+      res.status(202).json({ mode: "approval_required", approval });
+      return;
+    }
+
+    const run = await enqueuePromotionRun({
+      db,
+      sourceRevision: context.sourceRevision,
+      destinationTarget: context.destinationTarget,
+      sourceTarget: context.sourceTarget,
+      triggeredBy: actor,
+      ownerEmail: req.user?.email
+    });
+
+    await db.writeAuditLog(
+      actor,
+      "promotion.queued",
+      "run",
+      run.id,
+      {
+        sourceRevisionId: context.sourceRevision.id,
+        sourceTargetId: context.sourceTarget.id,
+        destinationTargetId: context.destinationTarget.id
+      }
+    );
+
+    res.status(202).json({ mode: "queued", run });
+  }));
+
+  app.get("/api/approvals", asyncRoute(async (req, res) => {
+    const parsed = approvalFiltersSchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    res.json({
+      approvals: await db.listPromotionApprovals(parsed.data, req.user?.email)
+    });
+  }));
+
+  app.post("/api/approvals/:id/approve", asyncRoute(async (req, res) => {
+    const approvalId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const parsed = approvalDecisionSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    const approval = await db.getPromotionApproval(approvalId, req.user?.email);
+    if (!approval) {
+      res.status(404).json({ error: "Promotion approval not found." });
+      return;
+    }
+    if (approval.status !== "pending") {
+      res.status(409).json({ error: "This approval is no longer pending." });
+      return;
+    }
+
+    let context;
+    try {
+      context = await resolvePromotionContext({
+        db,
+        sourceRevisionId: approval.sourceRevisionId,
+        destinationTargetId: approval.destinationTargetId,
+        ownerEmail: req.user?.email
+      });
+    } catch (error) {
+      if (error instanceof PromotionValidationError) {
+        res.status(error.statusCode).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+    const actor = req.user?.email ?? "unknown";
+    const run = await enqueuePromotionRun({
+      db,
+      sourceRevision: context.sourceRevision,
+      destinationTarget: context.destinationTarget,
+      sourceTarget: context.sourceTarget,
+      triggeredBy: actor,
+      ownerEmail: req.user?.email,
+      approvalId: approval.id
+    });
+    const updatedApproval = await db.decidePromotionApproval({
+      approvalId: approval.id,
+      status: "approved",
+      decidedBy: actor,
+      decisionComment: parsed.data.comment ?? null,
+      queuedRunId: run.id
+    });
+
+    await db.writeAuditLog(
+      actor,
+      "promotion.approved",
+      "promotion_approval",
+      approval.id,
+      {
+        runId: run.id,
+        sourceRevisionId: approval.sourceRevisionId,
+        destinationTargetId: approval.destinationTargetId
+      }
+    );
+    await db.writeAuditLog(
+      actor,
+      "promotion.queued",
+      "run",
+      run.id,
+      {
+        approvalId: approval.id,
+        sourceRevisionId: approval.sourceRevisionId,
+        destinationTargetId: approval.destinationTargetId
+      }
+    );
+
+    res.status(202).json({ approval: updatedApproval, run });
+  }));
+
+  app.post("/api/approvals/:id/reject", asyncRoute(async (req, res) => {
+    const approvalId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const parsed = approvalDecisionSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+
+    const approval = await db.getPromotionApproval(approvalId, req.user?.email);
+    if (!approval) {
+      res.status(404).json({ error: "Promotion approval not found." });
+      return;
+    }
+    if (approval.status !== "pending") {
+      res.status(409).json({ error: "This approval is no longer pending." });
+      return;
+    }
+
+    const actor = req.user?.email ?? "unknown";
+    const updatedApproval = await db.decidePromotionApproval({
+      approvalId: approval.id,
+      status: "rejected",
+      decidedBy: actor,
+      decisionComment: parsed.data.comment ?? null
+    });
+
+    await db.writeAuditLog(
+      actor,
+      "promotion.rejected",
+      "promotion_approval",
+      approval.id,
+      {
+        sourceRevisionId: approval.sourceRevisionId,
+        destinationTargetId: approval.destinationTargetId
+      }
+    );
+
+    res.json({ approval: updatedApproval });
   }));
 
   app.post("/api/rollbacks", asyncRoute(async (req, res) => {
@@ -1000,6 +1295,7 @@ async function syncInstallationRepositories(args: {
         owner: repository.owner,
         name: repository.name,
         fullName: repository.fullName,
+        description: repository.description,
         defaultBranch: repository.defaultBranch,
         isPrivate: repository.isPrivate,
         isArchived: repository.isArchived,
@@ -1035,6 +1331,134 @@ async function syncInstallationRepositories(args: {
   }
 }
 
+class PromotionValidationError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode = 409
+  ) {
+    super(message);
+  }
+}
+
+async function resolvePromotionContext(args: {
+  db: AutoOpsDb;
+  sourceRevisionId: string;
+  destinationTargetId: string;
+  ownerEmail?: string;
+}): Promise<{
+  sourceRevision: DeploymentRevisionSummary;
+  sourceTarget: DeploymentTargetSummary;
+  destinationTarget: DeploymentTargetSummary;
+}> {
+  const sourceRevision = await args.db.getRevision(args.sourceRevisionId);
+  if (!sourceRevision) {
+    throw new PromotionValidationError("Source revision not found.", 404);
+  }
+  if (sourceRevision.status !== "succeeded") {
+    throw new PromotionValidationError("Only succeeded revisions can be promoted.");
+  }
+
+  const [sourceTarget, destinationTarget] = await Promise.all([
+    args.db.getDeploymentTargetById(sourceRevision.targetId, args.ownerEmail),
+    args.db.getDeploymentTargetById(args.destinationTargetId, args.ownerEmail)
+  ]);
+
+  if (!sourceTarget || !destinationTarget) {
+    throw new PromotionValidationError("Promotion targets could not be resolved.", 404);
+  }
+
+  if (
+    sourceRevision.projectId !== destinationTarget.projectId ||
+    sourceTarget.projectId !== destinationTarget.projectId
+  ) {
+    throw new PromotionValidationError(
+      "Source revision and destination target must belong to the same project."
+    );
+  }
+
+  if (sourceTarget.id === destinationTarget.id) {
+    throw new PromotionValidationError("Select the next environment instead of the current target.");
+  }
+
+  if (sourceTarget.promotionOrder === null || destinationTarget.promotionOrder === null) {
+    throw new PromotionValidationError(
+      "These targets are not configured for release promotions."
+    );
+  }
+
+  const projectTargets = await args.db.listDeploymentTargets(
+    sourceRevision.projectId,
+    args.ownerEmail
+  );
+  const nextPromotionOrder = projectTargets
+    .flatMap((target) =>
+      target.promotionOrder !== null && target.promotionOrder > sourceTarget.promotionOrder!
+        ? [target.promotionOrder]
+        : []
+    )
+    .sort((left, right) => left - right)[0];
+
+  if (nextPromotionOrder === undefined || destinationTarget.promotionOrder !== nextPromotionOrder) {
+    throw new PromotionValidationError(
+      "Destination target is not the next promotion step for this revision."
+    );
+  }
+
+  if (extractImageDigest(destinationTarget.lastDeployedImage) === sourceRevision.imageDigest) {
+    throw new PromotionValidationError(
+      "Destination target already has this image digest live."
+    );
+  }
+
+  return {
+    sourceRevision,
+    sourceTarget,
+    destinationTarget
+  };
+}
+
+async function enqueuePromotionRun(args: {
+  db: AutoOpsDb;
+  sourceRevision: DeploymentRevisionSummary;
+  sourceTarget: DeploymentTargetSummary;
+  destinationTarget: DeploymentTargetSummary;
+  triggeredBy: string;
+  ownerEmail?: string;
+  approvalId?: string;
+}): Promise<PipelineRunSummary> {
+  const sourceRun = args.sourceRevision.runId
+    ? await args.db.getRun(args.sourceRevision.runId, args.ownerEmail)
+    : null;
+
+  return args.db.createRun({
+    projectId: args.destinationTarget.projectId,
+    source: "manual_promotion",
+    branch: sourceRun?.summary.branch ?? `promote/${args.destinationTarget.name}`,
+    commitSha: sourceRun?.summary.commitSha ?? args.sourceRevision.imageDigest,
+    triggeredBy: args.triggeredBy,
+    metadata: {
+      manualPromotion: {
+        sourceRevisionId: args.sourceRevision.id,
+        sourceTargetId: args.sourceTarget.id,
+        destinationTargetId: args.destinationTarget.id,
+        requestedBy: args.triggeredBy,
+        approvalId: args.approvalId ?? null,
+        imageRef: args.sourceRevision.imageRef,
+        imageDigest: args.sourceRevision.imageDigest
+      }
+    }
+  });
+}
+
+function extractImageDigest(image: string | null | undefined): string | null {
+  if (!image) {
+    return null;
+  }
+
+  const separatorIndex = image.lastIndexOf("@");
+  return separatorIndex === -1 ? null : image.slice(separatorIndex + 1);
+}
+
 const OAUTH_INSTALLATION_ID_OFFSET = 9_000_000_000_000;
 
 async function analyzeRepositoryByRef(args: {
@@ -1043,9 +1467,10 @@ async function analyzeRepositoryByRef(args: {
   };
   fetchOptional: (path: string) => Promise<string | null>;
 }) {
-  const [packageJson, pnpmWorkspace, turboJson, nxJson, packageLock, pnpmLock, yarnLock] =
+  const [packageJson, rootIndexHtml, pnpmWorkspace, turboJson, nxJson, packageLock, pnpmLock, yarnLock] =
     await Promise.all([
       args.fetchOptional("package.json"),
+      args.fetchOptional("index.html"),
       args.fetchOptional("pnpm-workspace.yaml"),
       args.fetchOptional("turbo.json"),
       args.fetchOptional("nx.json"),
@@ -1057,6 +1482,7 @@ async function analyzeRepositoryByRef(args: {
   return analyzeRepository({
     repository: args.repository,
     packageJson,
+    hasRootIndexHtml: rootIndexHtml !== null,
     hasPnpmWorkspace: pnpmWorkspace !== null,
     hasTurboJson: turboJson !== null,
     hasNxJson: nxJson !== null,
@@ -1097,41 +1523,47 @@ function isOAuthInstallation(installationId: number): boolean {
   return installationId >= OAUTH_INSTALLATION_ID_OFFSET;
 }
 
-function createManagedAppSlug(fullName: string, repoId: number): string {
-  const base = fullName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
-  return `${base || "app"}-${repoId}`;
-}
-
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, "");
-}
-
-function buildManagedPrimaryUrl(args: {
-  baseDomain: string;
-  webBaseUrl: string;
-  appSlug: string;
-  port: number;
-}): string | null {
-  if (args.baseDomain) {
-    return `https://${args.appSlug}.${args.baseDomain}`;
-  }
-
-  try {
-    const webUrl = new URL(args.webBaseUrl);
-    return `http://${webUrl.hostname}:${args.port}`;
-  } catch {
-    return null;
-  }
-}
-
 function buildManagedProjectConfig(
-  packageManager: "npm" | "pnpm" | "yarn"
+  framework: string,
+  packageManager: "npm" | "pnpm" | "yarn" | null
 ) {
-  return buildManagedNextjsConfig(packageManager, false);
+  if (framework === "nextjs" && packageManager) {
+    return buildManagedNextjsConfig(packageManager, false);
+  }
+
+  if (framework === "react" && packageManager) {
+    return buildManagedReactConfig(packageManager, false, "dist");
+  }
+
+  if (framework === "react_cra" && packageManager) {
+    return buildManagedReactConfig(packageManager, false, "build");
+  }
+
+  if (framework === "vue" && packageManager) {
+    return buildManagedStaticFrameworkConfig("vue", packageManager, false, "dist");
+  }
+
+  if (framework === "astro" && packageManager) {
+    return buildManagedStaticFrameworkConfig("astro", packageManager, false, "dist");
+  }
+
+  if (framework === "nuxt" && packageManager) {
+    return buildManagedNodeServerConfig("nuxt", packageManager, false);
+  }
+
+  if (framework === "express" && packageManager) {
+    return buildManagedNodeServerConfig("express", packageManager, false);
+  }
+
+  if (framework === "nestjs" && packageManager) {
+    return buildManagedNodeServerConfig("nestjs", packageManager, false);
+  }
+
+  if (framework === "static_html") {
+    return buildManagedStaticHtmlConfig();
+  }
+
+  return null;
 }
 
 function createGitHubOAuthState(email: string, secret: string): string {

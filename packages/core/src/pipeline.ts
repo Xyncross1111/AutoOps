@@ -27,6 +27,9 @@ const pipelineSchema = z.object({
           hostRef: z.string().min(1),
           composeFile: z.string().min(1),
           service: z.string().min(1),
+          environment: z.enum(["preview", "staging", "production", "custom"]).optional(),
+          promotionOrder: z.number().int().positive().optional(),
+          protected: z.boolean().optional(),
           healthcheck: z.object({
             url: z.string().url(),
             timeoutSeconds: z.number().int().positive().optional()
@@ -52,4 +55,3 @@ export function matchesPushTrigger(config: PipelineConfig, ref: string): boolean
     minimatch(branch, pattern, { dot: true })
   );
 }
-

@@ -17,6 +17,7 @@ export interface GitHubInstallationRepository {
   owner: string;
   name: string;
   fullName: string;
+  description: string | null;
   defaultBranch: string;
   isPrivate: boolean;
   isArchived: boolean;
@@ -399,6 +400,7 @@ export class GitHubAppService {
           owner: repository.owner.login,
           name: repository.name,
           fullName: repository.full_name,
+          description: repository.description ?? null,
           defaultBranch: repository.default_branch,
           isPrivate: repository.private,
           isArchived: repository.archived,

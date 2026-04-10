@@ -4,12 +4,12 @@
   "version": "0.1.0",
   "packageManager": "pnpm@10.28.2",
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "turbo run build",
     "dev:api": "pnpm --filter @autoops/api dev",
     "dev:web": "pnpm --filter @autoops/web dev",
     "dev:worker": "pnpm --filter @autoops/worker dev",
-    "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",
@@ -20,9 +20,9 @@
     "@vitejs/plugin-react": "^4.4.1",
     "jsdom": "^26.0.0",
     "tsx": "^4.19.3",
+    "turbo": "^2.9.6",
     "typescript": "^5.8.2",
     "vite": "^6.2.0",
     "vitest": "^3.0.9"
   }
 }
-

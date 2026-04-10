@@ -1,5 +1,5 @@
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   decryptSecret,
@@ -41,6 +41,8 @@ export class PipelineWorker {
     try {
       if (run.source === "manual_rollback" && run.metadata.manualRollback) {
         await this.handleManualRollback(run);
+      } else if (run.source === "manual_promotion" && run.metadata.manualPromotion) {
+        await this.handleManualPromotion(run);
       } else {
         await this.handlePipelineRun(run);
       }
@@ -56,7 +58,7 @@ export class PipelineWorker {
 
   private async handlePipelineRun(run: ClaimedRun): Promise<void> {
     if (run.mode === "managed_nextjs") {
-      await this.handleManagedNextjsRun(run);
+      await this.handleManagedProjectRun(run);
       return;
     }
 
@@ -94,6 +96,9 @@ export class PipelineWorker {
         run.projectId,
         resolvedPipelineConfig.deploy.targets.map((target) => ({
           name: target.name,
+          environment: target.environment ?? null,
+          promotionOrder: target.promotionOrder ?? null,
+          protected: target.protected ?? false,
           hostRef: target.hostRef,
           composeFile: target.composeFile,
           service: target.service,
@@ -185,6 +190,7 @@ export class PipelineWorker {
               target.healthcheck.url,
               target.healthcheck.timeoutSeconds,
               connection,
+              undefined,
               log
             );
             throw error;
@@ -205,28 +211,27 @@ export class PipelineWorker {
     }
   }
 
-  private async handleManagedNextjsRun(run: ClaimedRun): Promise<void> {
-    if (!run.appSlug || !run.managedConfig) {
-      throw new Error("Managed Next.js project metadata is incomplete.");
+  private async handleManagedProjectRun(run: ClaimedRun): Promise<void> {
+    if (!run.managedConfig) {
+      throw new Error("Managed project metadata is incomplete.");
     }
 
     const managedConfig = run.managedConfig;
+    const managedEnvironment = await this.loadProjectSecrets(run.projectId);
     let workdir = "";
     const log = async (stageName: string, line: string) => {
       await this.db.appendRunLog(run.id, stageName, line);
     };
 
     try {
-      const deploymentTargets = await this.db.listDeploymentTargets(run.projectId);
-      const target = deploymentTargets.find(
-        (candidate) => candidate.targetType === "managed_vps"
-      );
+      const target = await this.resolveManagedRunTarget(run);
 
       if (!target || !target.managedPort || !target.managedRuntimeDir) {
         throw new Error("Managed deployment target is not configured.");
       }
 
-      const localTag = `autoops-managed-${run.appSlug}:${run.id}`;
+      const targetAppSlug = resolveManagedTargetAppSlug(target, run.appSlug);
+      const localTag = `autoops-managed-${targetAppSlug}:${run.id}`;
 
       await this.runStage(run.id, "prepare", 1, async () => {
         const token = await this.resolveManagedRepositoryToken(run);
@@ -238,10 +243,12 @@ export class PipelineWorker {
           baseTempDir: this.config.RUNNER_TEMP_DIR,
           onOutput: (line) => log("prepare", line)
         });
-        await writeManagedBuildFiles(workdir, managedConfig);
+        await writeManagedBuildFiles(workdir, managedConfig, {
+          includeBuildEnvironment: Object.keys(managedEnvironment).length > 0
+        });
         await log(
           "prepare",
-          `Prepared managed Next.js build context for ${run.repoOwner}/${run.repoName}.`
+          `Prepared managed ${describeManagedFramework(managedConfig.framework)} build context for ${run.repoOwner}/${run.repoName}.`
         );
       });
 
@@ -251,25 +258,33 @@ export class PipelineWorker {
           context: ".",
           dockerfile: "Dockerfile.autoops",
           localTag,
+          buildEnvironment: managedEnvironment,
+          baseImages: getManagedBaseImages(managedConfig),
+          maxAttempts: 3,
           onOutput: (line) => log("build", line)
         });
         await log("build", `Built managed image ${localTag}.`);
       });
 
       const imageId = await this.runStage(run.id, "test", 3, async () => {
-        await log("test", "Managed Next.js imports use framework detection instead of custom test commands.");
+        await log(
+          "test",
+          "Managed imports use framework detection and generated runtime recipes instead of custom test commands."
+        );
         return this.infra.inspectImageId({ imageTag: localTag });
       });
 
       await this.runStage(run.id, "deploy", 4, async () => {
         await this.infra.deployManagedTarget({
-          appSlug: run.appSlug!,
+          appSlug: targetAppSlug,
           runtimeDir: target.managedRuntimeDir!,
           composeFile: target.composeFile,
           service: target.service,
           imageTag: localTag,
           publicPort: target.managedPort!,
+          containerPort: managedConfig.outputPort,
           networkName: this.config.MANAGED_NETWORK_NAME,
+          runtimeEnvironment: managedEnvironment,
           managedDomain: target.managedDomain,
           edgeContainerName: this.config.MANAGED_BASE_DOMAIN
             ? this.config.MANAGED_EDGE_CONTAINER_NAME
@@ -296,10 +311,7 @@ export class PipelineWorker {
         });
       });
     } catch (error) {
-      const deploymentTargets = await this.db.listDeploymentTargets(run.projectId);
-      const target = deploymentTargets.find(
-        (candidate) => candidate.targetType === "managed_vps"
-      );
+      const target = await this.resolveManagedRunTarget(run).catch(() => null);
       if (target) {
         await this.db.markDeploymentTargetStatus({
           targetId: target.id,
@@ -312,6 +324,7 @@ export class PipelineWorker {
           target.healthcheckUrl,
           60,
           undefined,
+          managedEnvironment,
           log
         );
       }
@@ -321,6 +334,39 @@ export class PipelineWorker {
         await this.infra.cleanupPath(workdir);
       }
     }
+  }
+
+  private async resolveManagedRunTarget(run: ClaimedRun): Promise<DeploymentTargetSummary> {
+    const managedDeployment = run.metadata.managedDeployment;
+
+    if (managedDeployment?.targetId) {
+      const directTarget = await this.db.getDeploymentTargetById(managedDeployment.targetId);
+      if (directTarget) {
+        return directTarget;
+      }
+    }
+
+    const deploymentTargets = await this.db.listDeploymentTargets(run.projectId);
+
+    if (managedDeployment?.targetName) {
+      const namedTarget = deploymentTargets.find(
+        (candidate) =>
+          candidate.targetType === "managed_vps" &&
+          candidate.name === managedDeployment.targetName
+      );
+      if (namedTarget) {
+        return namedTarget;
+      }
+    }
+
+    const fallbackTarget = deploymentTargets.find(
+      (candidate) => candidate.targetType === "managed_vps"
+    );
+    if (!fallbackTarget) {
+      throw new Error("Managed deployment target is not configured.");
+    }
+
+    return fallbackTarget;
   }
 
   private async resolveManagedRepositoryToken(run: ClaimedRun): Promise<string> {
@@ -380,17 +426,20 @@ export class PipelineWorker {
           `Rolling back ${target.name} to ${revision.imageRef}@${revision.imageDigest}.`
         );
         if (target.targetType === "managed_vps") {
-          if (!run.appSlug || !target.managedPort || !target.managedRuntimeDir) {
+          if (!target.managedPort || !target.managedRuntimeDir) {
             throw new Error("Managed rollback target is missing runtime metadata.");
           }
+          const targetAppSlug = resolveManagedTargetAppSlug(target, run.appSlug);
           await this.infra.deployManagedTarget({
-            appSlug: run.appSlug,
+            appSlug: targetAppSlug,
             runtimeDir: target.managedRuntimeDir,
             composeFile: target.composeFile,
             service: target.service,
             imageTag: revision.imageRef,
             publicPort: target.managedPort,
+            containerPort: getManagedContainerPort(target.healthcheckUrl),
             networkName: this.config.MANAGED_NETWORK_NAME,
+            runtimeEnvironment: secrets,
             managedDomain: target.managedDomain,
             edgeContainerName: this.config.MANAGED_BASE_DOMAIN
               ? this.config.MANAGED_EDGE_CONTAINER_NAME
@@ -442,6 +491,148 @@ export class PipelineWorker {
     }
   }
 
+  private async handleManualPromotion(run: ClaimedRun): Promise<void> {
+    const request = run.metadata.manualPromotion;
+    if (!request) {
+      throw new Error("Manual promotion metadata is missing.");
+    }
+
+    const [target, sourceRevision, sourceTarget] = await Promise.all([
+      this.db.getDeploymentTargetById(request.destinationTargetId),
+      this.db.getRevision(request.sourceRevisionId),
+      this.db.getDeploymentTargetById(request.sourceTargetId)
+    ]);
+
+    if (!target || !sourceRevision) {
+      throw new Error("Promotion target or source revision was not found.");
+    }
+    if (sourceRevision.status !== "succeeded") {
+      throw new Error("Only succeeded revisions can be promoted.");
+    }
+
+    const secrets = await this.loadProjectSecrets(run.projectId);
+    const connection =
+      target.targetType === "ssh_compose"
+        ? resolveTargetSecrets(secrets, target.hostRef)
+        : undefined;
+    const runtimeEnvironment = target.targetType === "managed_vps" ? secrets : undefined;
+    const imageRef = request.imageRef || sourceRevision.imageRef;
+    const imageDigest = request.imageDigest || sourceRevision.imageDigest;
+    const log = async (stageName: string, line: string) => {
+      await this.db.appendRunLog(run.id, stageName, line);
+    };
+
+    try {
+      await this.runStage(run.id, "promote", 1, async () => {
+        await log(
+          "promote",
+          `Promoting ${imageRef}@${imageDigest} from ${sourceTarget?.name ?? sourceRevision.targetName} to ${target.name}.`
+        );
+
+        if (target.targetType === "managed_vps") {
+          if (!target.managedPort || !target.managedRuntimeDir) {
+            throw new Error("Managed promotion target is missing runtime metadata.");
+          }
+
+          const targetAppSlug = resolveManagedTargetAppSlug(target, run.appSlug);
+          await this.infra.deployManagedTarget({
+            appSlug: targetAppSlug,
+            runtimeDir: target.managedRuntimeDir,
+            composeFile: target.composeFile,
+            service: target.service,
+            imageTag: imageRef,
+            publicPort: target.managedPort,
+            containerPort: run.managedConfig?.outputPort ?? getManagedContainerPort(target.healthcheckUrl),
+            networkName: this.config.MANAGED_NETWORK_NAME,
+            runtimeEnvironment,
+            managedDomain: target.managedDomain,
+            edgeContainerName: this.config.MANAGED_BASE_DOMAIN
+              ? this.config.MANAGED_EDGE_CONTAINER_NAME
+              : null,
+            onOutput: (line) => log("promote", line)
+          });
+        } else if (connection) {
+          await this.infra.deployComposeTarget({
+            host: connection.host,
+            user: connection.user,
+            privateKey: connection.privateKey,
+            port: connection.port,
+            composeFile: target.composeFile,
+            service: target.service,
+            imageRef,
+            imageDigest,
+            onOutput: (line) => log("promote", line)
+          });
+        } else {
+          throw new Error("SSH promotion target connection is missing.");
+        }
+
+        await this.infra.waitForHealthcheck({
+          url: target.healthcheckUrl,
+          timeoutSeconds: target.targetType === "managed_vps" ? 60 : undefined,
+          onOutput: (line) => log("promote", line)
+        });
+        await this.db.createDeploymentRevision({
+          targetId: target.id,
+          runId: run.id,
+          imageRef,
+          imageDigest,
+          status: "succeeded"
+        });
+        await this.db.markDeploymentTargetStatus({
+          targetId: target.id,
+          lastStatus: "succeeded",
+          lastDeployedImage: `${imageRef}@${imageDigest}`,
+          lastError: null
+        });
+      });
+
+      await this.db.writeAuditLog(
+        run.triggeredBy,
+        "promotion.succeeded",
+        "run",
+        run.id,
+        {
+          sourceRevisionId: request.sourceRevisionId,
+          sourceTargetId: request.sourceTargetId,
+          destinationTargetId: request.destinationTargetId,
+          approvalId: request.approvalId ?? null,
+          imageDigest
+        }
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Manual promotion failed.";
+      await this.db.markDeploymentTargetStatus({
+        targetId: target.id,
+        lastStatus: "failed",
+        lastError: message
+      });
+      await this.performAutomaticRollback(
+        run,
+        target,
+        target.healthcheckUrl,
+        target.targetType === "managed_vps" ? 60 : undefined,
+        connection,
+        runtimeEnvironment,
+        log
+      );
+      await this.db.writeAuditLog(
+        run.triggeredBy,
+        "promotion.failed",
+        "run",
+        run.id,
+        {
+          sourceRevisionId: request.sourceRevisionId,
+          sourceTargetId: request.sourceTargetId,
+          destinationTargetId: request.destinationTargetId,
+          approvalId: request.approvalId ?? null,
+          errorMessage: message
+        }
+      );
+      throw error;
+    }
+  }
+
   private async performAutomaticRollback(
     run: ClaimedRun,
     target: DeploymentTargetSummary,
@@ -455,6 +646,7 @@ export class PipelineWorker {
           port?: number;
         }
       | undefined,
+    runtimeEnvironment: Record<string, string> | undefined,
     log: (stageName: string, line: string) => Promise<void>
   ): Promise<void> {
     const revisions = await this.db.listTargetRevisions(target.id);
@@ -481,17 +673,20 @@ export class PipelineWorker {
         `Attempting automatic rollback for ${target.name} to ${revision.imageRef}@${revision.imageDigest}.`
       );
       if (target.targetType === "managed_vps") {
-        if (!run.appSlug || !target.managedPort || !target.managedRuntimeDir) {
+        if (!target.managedPort || !target.managedRuntimeDir) {
           throw new Error("Managed rollback target is missing runtime metadata.");
         }
+        const targetAppSlug = resolveManagedTargetAppSlug(target, run.appSlug);
         await this.infra.deployManagedTarget({
-          appSlug: run.appSlug,
+          appSlug: targetAppSlug,
           runtimeDir: target.managedRuntimeDir,
           composeFile: target.composeFile,
           service: target.service,
           imageTag: revision.imageRef,
           publicPort: target.managedPort,
+          containerPort: getManagedContainerPort(target.healthcheckUrl),
           networkName: this.config.MANAGED_NETWORK_NAME,
+          runtimeEnvironment,
           managedDomain: target.managedDomain,
           edgeContainerName: this.config.MANAGED_BASE_DOMAIN
             ? this.config.MANAGED_EDGE_CONTAINER_NAME
@@ -625,37 +820,41 @@ function sleep(ms: number): Promise<void> {
 async function writeManagedBuildFiles(
   workdir: string,
   config: {
-    installCommand: string;
-    buildCommand: string;
-    startCommand: string;
-    nodeVersion: string;
-  }
+    framework: string;
+    packageManager: string | null;
+    packageManagerVersion?: string | null;
+    installCommand: string | null;
+    buildCommand: string | null;
+    startCommand: string | null;
+    nodeVersion: string | null;
+    outputPort: number;
+    outputDirectory: string | null;
+  },
+  options: {
+    includeBuildEnvironment?: boolean;
+  } = {}
 ): Promise<void> {
+  const dockerfile = buildManagedDockerfile(config, options);
+
   await writeFile(
     join(workdir, "Dockerfile.autoops"),
-    [
-      `FROM node:${config.nodeVersion}-alpine`,
-      "WORKDIR /app",
-      "ENV NODE_ENV=production",
-      "ENV NEXT_TELEMETRY_DISABLED=1",
-      "ENV HOSTNAME=0.0.0.0",
-      "ENV PORT=3000",
-      "RUN corepack enable",
-      "COPY . .",
-      `RUN ${config.installCommand}`,
-      `RUN ${config.buildCommand}`,
-      'EXPOSE 3000',
-      `CMD ["sh", "-lc", "${escapeForDoubleQuotedShell(config.startCommand)}"]`
-    ].join("\n"),
+    dockerfile,
     "utf8"
   );
+
+  if (config.framework !== "nextjs") {
+    await writeFile(join(workdir, "nginx.autoops.conf"), buildManagedNginxConfig(), "utf8");
+  }
 
   await writeFile(
     join(workdir, ".dockerignore"),
     [
       ".git",
+      ".dockerignore",
+      "Dockerfile.autoops",
       "node_modules",
       ".next",
+      "build",
       "dist",
       "coverage",
       ".turbo"
@@ -666,4 +865,368 @@ async function writeManagedBuildFiles(
 
 function escapeForDoubleQuotedShell(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function buildManagedDockerfile(config: {
+  framework: string;
+  packageManager: string | null;
+  packageManagerVersion?: string | null;
+  installCommand: string | null;
+  buildCommand: string | null;
+  startCommand: string | null;
+  nodeVersion: string | null;
+  outputPort: number;
+  outputDirectory: string | null;
+},
+options: {
+  includeBuildEnvironment?: boolean;
+} = {}) {
+  if (config.framework === "nextjs") {
+    if (!config.installCommand || !config.buildCommand || !config.startCommand || !config.nodeVersion) {
+      throw new Error("Managed Next.js config is incomplete.");
+    }
+
+    const dependencyCopyInstruction = buildManagedDependencyCopyInstruction(config);
+    const packageManagerSetup = buildManagedPackageManagerSetup(config);
+    const installInstruction = buildManagedInstallInstruction(config);
+
+    return [
+      "# syntax=docker/dockerfile:1.7",
+      `FROM node:${config.nodeVersion}-alpine AS base`,
+      "WORKDIR /app",
+      "ENV NEXT_TELEMETRY_DISABLED=1",
+      "ENV HOSTNAME=0.0.0.0",
+      `ENV PORT=${config.outputPort}`,
+      ...packageManagerSetup,
+      "",
+      "FROM base AS deps",
+      dependencyCopyInstruction,
+      installInstruction,
+      "",
+      "FROM base",
+      "ENV NODE_ENV=production",
+      dependencyCopyInstruction,
+      "COPY --from=deps /app/node_modules ./node_modules",
+      "COPY . .",
+      buildManagedBuildInstruction(config, options),
+      `EXPOSE ${config.outputPort}`,
+      `CMD ["sh", "-lc", "${escapeForDoubleQuotedShell(config.startCommand)}"]`
+    ].join("\n");
+  }
+
+  if (isManagedNodeServerFramework(config.framework)) {
+    if (!config.installCommand || !config.buildCommand || !config.startCommand || !config.nodeVersion) {
+      throw new Error("Managed Node server config is incomplete.");
+    }
+
+    const dependencyCopyInstruction = buildManagedDependencyCopyInstruction(config);
+    const packageManagerSetup = buildManagedPackageManagerSetup(config);
+    const installInstruction = buildManagedInstallInstruction(config);
+
+    return [
+      "# syntax=docker/dockerfile:1.7",
+      `FROM node:${config.nodeVersion}-alpine AS base`,
+      "WORKDIR /app",
+      "ENV HOSTNAME=0.0.0.0",
+      `ENV PORT=${config.outputPort}`,
+      ...packageManagerSetup,
+      "",
+      "FROM base AS deps",
+      dependencyCopyInstruction,
+      installInstruction,
+      "",
+      "FROM base",
+      "ENV NODE_ENV=production",
+      dependencyCopyInstruction,
+      "COPY --from=deps /app/node_modules ./node_modules",
+      "COPY . .",
+      buildManagedBuildInstruction(config, options),
+      `EXPOSE ${config.outputPort}`,
+      `CMD ["sh", "-lc", "${escapeForDoubleQuotedShell(config.startCommand)}"]`
+    ].join("\n");
+  }
+
+  if (isManagedStaticFramework(config.framework)) {
+    if (!config.installCommand || !config.buildCommand || !config.nodeVersion || !config.outputDirectory) {
+      throw new Error("Managed static framework config is incomplete.");
+    }
+
+    const dependencyCopyInstruction = buildManagedDependencyCopyInstruction(config);
+    const packageManagerSetup = buildManagedPackageManagerSetup(config);
+    const installInstruction = buildManagedInstallInstruction(config);
+
+    return [
+      "# syntax=docker/dockerfile:1.7",
+      `FROM node:${config.nodeVersion}-alpine AS base`,
+      "WORKDIR /app",
+      ...packageManagerSetup,
+      "",
+      "FROM base AS deps",
+      dependencyCopyInstruction,
+      installInstruction,
+      "",
+      "FROM base AS build",
+      dependencyCopyInstruction,
+      "COPY --from=deps /app/node_modules ./node_modules",
+      "COPY . .",
+      buildManagedBuildInstruction(config, options),
+      "",
+      "FROM nginx:1.27-alpine",
+      "COPY nginx.autoops.conf /etc/nginx/conf.d/default.conf",
+      `COPY --from=build /app/${config.outputDirectory} /usr/share/nginx/html`,
+      `EXPOSE ${config.outputPort}`,
+      'CMD ["nginx", "-g", "daemon off;"]'
+    ].join("\n");
+  }
+
+  if (config.framework === "static_html") {
+    return [
+      "# syntax=docker/dockerfile:1.7",
+      "FROM nginx:1.27-alpine",
+      "COPY nginx.autoops.conf /etc/nginx/conf.d/default.conf",
+      "COPY . /usr/share/nginx/html",
+      "RUN rm -f /usr/share/nginx/html/Dockerfile.autoops /usr/share/nginx/html/nginx.autoops.conf /usr/share/nginx/html/.dockerignore",
+      `EXPOSE ${config.outputPort}`,
+      'CMD ["nginx", "-g", "daemon off;"]'
+    ].join("\n");
+  }
+
+  throw new Error(`Unsupported managed framework ${config.framework}.`);
+}
+
+function buildManagedDependencyCopyInstruction(config: {
+  packageManager: string | null;
+  installCommand: string | null;
+}) {
+  const files = ["package.json"];
+
+  if (config.packageManager === "pnpm" && config.installCommand?.includes("--frozen-lockfile")) {
+    files.push("pnpm-lock.yaml");
+  } else if (config.packageManager === "yarn" && config.installCommand?.includes("--frozen-lockfile")) {
+    files.push("yarn.lock");
+  } else if (config.packageManager === "npm" && config.installCommand === "npm ci") {
+    files.push("package-lock.json");
+  }
+
+  return `COPY ${files.join(" ")} ./`;
+}
+
+function buildManagedPackageManagerSetup(config: {
+  packageManager: string | null;
+  packageManagerVersion?: string | null;
+}) {
+  if (config.packageManager === "pnpm") {
+    if (config.packageManagerVersion) {
+      return [
+        `RUN corepack enable && corepack prepare pnpm@${config.packageManagerVersion} --activate`
+      ];
+    }
+
+    return ["RUN corepack enable"];
+  }
+
+  if (config.packageManager === "yarn") {
+    if (config.packageManagerVersion) {
+      return [
+        `RUN corepack enable && corepack prepare yarn@${config.packageManagerVersion} --activate`
+      ];
+    }
+
+    return ["RUN corepack enable"];
+  }
+
+  return [];
+}
+
+function buildManagedInstallInstruction(config: {
+  packageManager: string | null;
+  installCommand: string | null;
+}) {
+  if (!config.installCommand) {
+    throw new Error("Managed install command is incomplete.");
+  }
+
+  if (config.packageManager === "pnpm") {
+    const command = config.installCommand.includes("--store-dir")
+      ? config.installCommand
+      : config.installCommand.replace(/^pnpm install\b/, "pnpm install --store-dir /pnpm/store");
+    const allowBlockedBuildsScript = [
+      "if pnpm help ignored-builds >/dev/null 2>&1; then",
+      "  blocked=$(pnpm ignored-builds | sed -n \"s/^  //p\" | grep -v \"^None$\" || true)",
+      "  if [ -n \"$blocked\" ]; then",
+      "    echo \"Approving blocked pnpm build scripts for: $blocked\"",
+      `    BLOCKED_BUILDS="$blocked" node -e "${escapeForDoubleQuotedShell(
+        [
+          "const fs = require('node:fs');",
+          "const blocked = (process.env.BLOCKED_BUILDS ?? '').split(/\\n+/).map((value) => value.trim()).filter((value) => value.length > 0 && value !== 'None');",
+          "if (blocked.length === 0) process.exit(0);",
+          "const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));",
+          "const pnpm = pkg.pnpm && typeof pkg.pnpm === 'object' ? pkg.pnpm : {};",
+          "const existing = Array.isArray(pnpm.onlyBuiltDependencies) ? pnpm.onlyBuiltDependencies : [];",
+          "pnpm.onlyBuiltDependencies = Array.from(new Set([...existing, ...blocked])).sort();",
+          "pkg.pnpm = pnpm;",
+          "fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\\n');"
+        ].join(" ")
+      )}"`,
+      "    pnpm rebuild --reporter append-only",
+      "  fi",
+      "fi"
+    ].join("; ");
+    return `RUN --mount=type=cache,target=/pnpm/store sh -lc '${escapeForSingleQuotedShell(`${command}; ${allowBlockedBuildsScript}`)}'`;
+  }
+
+  if (config.packageManager === "npm") {
+    return `RUN --mount=type=cache,target=/root/.npm ${config.installCommand}`;
+  }
+
+  if (config.packageManager === "yarn") {
+    return `RUN --mount=type=cache,target=/usr/local/share/.cache/yarn ${config.installCommand}`;
+  }
+
+  return `RUN ${config.installCommand}`;
+}
+
+function buildManagedBuildInstruction(config: {
+  framework: string;
+  buildCommand: string | null;
+},
+options: {
+  includeBuildEnvironment?: boolean;
+} = {}) {
+  if (!config.buildCommand) {
+    throw new Error("Managed build command is incomplete.");
+  }
+
+  const secretMount = options.includeBuildEnvironment
+    ? "--mount=type=secret,id=autoops_build_env,target=/run/secrets/autoops_build_env "
+    : "";
+  const buildCommand = options.includeBuildEnvironment
+    ? `sh -lc 'set -a && . /run/secrets/autoops_build_env && set +a && ${escapeForSingleQuotedShell(
+        config.buildCommand
+      )}'`
+    : config.buildCommand;
+
+  if (config.framework === "nextjs") {
+    return `RUN ${secretMount}--mount=type=cache,target=/app/.next/cache ${buildCommand}`;
+  }
+
+  if (config.framework === "nuxt") {
+    return `RUN ${secretMount}--mount=type=cache,target=/app/.nuxt ${buildCommand}`;
+  }
+
+  if (isManagedStaticFramework(config.framework)) {
+    return `RUN ${secretMount}--mount=type=cache,target=/app/node_modules/.cache ${buildCommand}`;
+  }
+
+  return `RUN ${secretMount}${buildCommand}`;
+}
+
+function buildManagedNginxConfig() {
+  return [
+    "server {",
+    "  listen 80;",
+    "  server_name _;",
+    "  root /usr/share/nginx/html;",
+    "  index index.html;",
+    "",
+    "  location / {",
+    "    try_files $uri $uri/ /index.html;",
+    "  }",
+    "}"
+  ].join("\n");
+}
+
+function resolveManagedTargetAppSlug(
+  target: Pick<DeploymentTargetSummary, "managedRuntimeDir">,
+  fallbackAppSlug?: string | null
+) {
+  if (target.managedRuntimeDir) {
+    return basename(target.managedRuntimeDir);
+  }
+
+  if (fallbackAppSlug) {
+    return fallbackAppSlug;
+  }
+
+  throw new Error("Managed deployment target is missing an app slug.");
+}
+
+function getManagedBaseImages(config: {
+  framework: string;
+  nodeVersion: string | null;
+}) {
+  if (config.framework === "nextjs") {
+    return [`node:${config.nodeVersion ?? "20"}-alpine`];
+  }
+
+  if (isManagedNodeServerFramework(config.framework)) {
+    return [`node:${config.nodeVersion ?? "20"}-alpine`];
+  }
+
+  if (isManagedStaticFramework(config.framework)) {
+    return [`node:${config.nodeVersion ?? "20"}-alpine`, "nginx:1.27-alpine"];
+  }
+
+  if (config.framework === "static_html") {
+    return ["nginx:1.27-alpine"];
+  }
+
+  return [];
+}
+
+function getManagedContainerPort(healthcheckUrl: string) {
+  try {
+    const url = new URL(healthcheckUrl);
+    if (url.port) {
+      return Number(url.port);
+    }
+    return url.protocol === "https:" ? 443 : 80;
+  } catch {
+    return 3000;
+  }
+}
+
+function escapeForSingleQuotedShell(value: string) {
+  return value.replace(/'/g, `'\"'\"'`);
+}
+
+function describeManagedFramework(framework: string) {
+  if (framework === "nextjs") {
+    return "Next.js";
+  }
+  if (framework === "nuxt") {
+    return "Nuxt";
+  }
+  if (framework === "express") {
+    return "Express";
+  }
+  if (framework === "nestjs") {
+    return "NestJS";
+  }
+  if (framework === "react" || framework === "react_cra") {
+    return "React";
+  }
+  if (framework === "vue") {
+    return "Vue";
+  }
+  if (framework === "astro") {
+    return "Astro";
+  }
+  if (framework === "static_html") {
+    return "static HTML";
+  }
+  return framework;
+}
+
+function isManagedStaticFramework(framework: string) {
+  return (
+    framework === "react" ||
+    framework === "react_cra" ||
+    framework === "vue" ||
+    framework === "astro"
+  );
+}
+
+function isManagedNodeServerFramework(framework: string) {
+  return framework === "nuxt" || framework === "express" || framework === "nestjs";
 }

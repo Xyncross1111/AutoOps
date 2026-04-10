@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@autoops/core": "workspace:*",
+    "@fontsource/geist-mono": "^5.2.7",
+    "@fontsource/geist-sans": "^5.2.5",
     "lucide-react": "^1.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

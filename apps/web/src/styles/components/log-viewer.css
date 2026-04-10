@@ -1,0 +1,93 @@
+.ao-log-viewer {
+  display: grid;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+.ao-log-viewer__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ao-log-viewer__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ao-log-viewer__body {
+  display: grid;
+  gap: 1px;
+  min-height: clamp(420px, 56vh, 680px);
+  max-height: min(78vh, 860px);
+  overflow: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--log-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.ao-log-line {
+  display: grid;
+  grid-template-columns: minmax(72px, 92px) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--log-line);
+  color: var(--log-text);
+  font: 500 13px / 1.65 var(--font-mono);
+}
+
+.ao-log-line:last-child {
+  border-bottom: 0;
+}
+
+.ao-log-line__stage {
+  color: var(--log-muted);
+}
+
+.ao-log-line__message {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.ao-log-viewer__empty {
+  color: var(--log-muted);
+  font: 500 13px / 1.65 var(--font-mono);
+}
+
+@media (max-width: 760px) {
+  .ao-log-viewer__toolbar {
+    align-items: stretch;
+  }
+
+  .ao-log-viewer__actions {
+    width: 100%;
+  }
+
+  .ao-log-viewer__actions .ao-button {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  .ao-log-viewer__body {
+    min-height: 62vh;
+    max-height: none;
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .ao-log-line {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .ao-log-line__stage {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+}

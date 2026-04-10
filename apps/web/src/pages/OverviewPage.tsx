@@ -1,13 +1,23 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, ArrowRight, FolderPlus, Rocket, Workflow } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  ClipboardCheck,
+  FolderPlus,
+  Rocket,
+  ShieldAlert,
+  Workflow
+} from "lucide-react";
 import { Link } from "react-router-dom";
 import type { DashboardOverview } from "@autoops/core";
 
+import { MetaList } from "../components/MetaList";
+import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState, InlineError, LoadingBlock } from "../components/States";
 import { useAppSession } from "../app-context";
 import { getDashboardOverview, rerunRun } from "../lib/api";
-import { formatDateTime, formatPercent, formatRelativeTime, shortSha } from "../lib/format";
+import { formatDateTime, formatFailureSummary, formatPercent, formatRelativeTime, shortSha } from "../lib/format";
 
 export function OverviewPage() {
   const { token, refreshNonce, refreshApp } = useAppSession();
@@ -64,7 +74,16 @@ export function OverviewPage() {
   }
 
   if (error && !overview) {
-    return <InlineError message={error} action={<button onClick={refreshApp}>Retry</button>} />;
+    return (
+      <InlineError
+        message={error}
+        action={
+          <button className="ao-button ao-button--secondary" onClick={refreshApp}>
+            Retry
+          </button>
+        }
+      />
+    );
   }
 
   if (!overview) {
@@ -72,264 +91,417 @@ export function OverviewPage() {
       <EmptyState
         title="No overview available"
         description="AutoOps could not load the current platform summary."
-        action={<button onClick={refreshApp}>Refresh</button>}
+        action={
+          <button className="ao-button ao-button--secondary" onClick={refreshApp}>
+            Refresh
+          </button>
+        }
       />
     );
   }
 
-  return (
-    <div className="page-stack">
-      {error ? <InlineError message={error} /> : null}
+  const pendingApprovals = overview.attention.pendingApprovals ?? [];
+  const pendingApprovalCount = overview.metrics.pendingApprovalCount ?? pendingApprovals.length;
 
-      <section className="hero-grid">
-        <div className="hero-card spotlight-card">
-          <div className="spotlight-copy">
-            <p className="eyebrow">At a glance</p>
-            <h3>Keep delivery healthy without losing the operational thread.</h3>
-            <p>
-              AutoOps now highlights active execution, failed delivery, unhealthy targets,
-              and the most recent control-plane activity in a single executive view.
-            </p>
+  return (
+    <div className="ao-page">
+      <PageHeader
+        eyebrow="Platform / Summary"
+        title="Operational overview"
+        description="Track delivery health, active work, and the operational items that need attention first."
+        meta={
+          <div className="ao-inline-meta">
+            <span className="ao-chip">{overview.metrics.projectCount} projects</span>
+            <span className="ao-chip">{overview.metrics.runningRunCount} running</span>
+            <span className="ao-chip">{formatPercent(overview.metrics.successRate7d)} success</span>
           </div>
-          <div className="hero-actions">
-            <Link className="button-link" to="/repositories">
+        }
+        actions={
+          <>
+            <Link className="ao-link-button ao-link-button--primary" to="/repositories">
               <FolderPlus size={16} />
               <span>Connect GitHub</span>
             </Link>
-            <Link className="button-link secondary" to="/runs">
+            <Link className="ao-link-button ao-link-button--secondary" to="/runs">
               <Workflow size={16} />
-              <span>Open Run Triage</span>
+              <span>Open runs</span>
             </Link>
-          </div>
-        </div>
+          </>
+        }
+      />
 
-        <div className="metric-grid">
-          <MetricCard label="Projects" value={String(overview.metrics.projectCount)} />
-          <MetricCard label="Queued Runs" value={String(overview.metrics.queuedRunCount)} />
-          <MetricCard label="Active Runs" value={String(overview.metrics.runningRunCount)} />
-          <MetricCard label="7-Day Success" value={formatPercent(overview.metrics.successRate7d)} />
-          <MetricCard
-            label="Unhealthy Targets"
-            value={String(overview.metrics.unhealthyTargetCount)}
-            tone={overview.metrics.unhealthyTargetCount > 0 ? "danger" : "success"}
-          />
-        </div>
+      {error ? <InlineError message={error} /> : null}
+
+      <section className="ao-stat-strip">
+        <StatCard
+          label="Latest failed run"
+          value={overview.attention.latestFailedRun ? overview.attention.latestFailedRun.projectName : "None"}
+          meta={
+            overview.attention.latestFailedRun
+              ? `${overview.attention.latestFailedRun.branch} • ${formatRelativeTime(overview.attention.latestFailedRun.queuedAt)}`
+              : "No current failures"
+          }
+        />
+        <StatCard
+          label="Active runs"
+          value={String(overview.metrics.runningRunCount)}
+          meta={`${overview.metrics.queuedRunCount} queued`}
+        />
+        <StatCard
+          label="Unhealthy targets"
+          value={String(overview.metrics.unhealthyTargetCount)}
+          meta={overview.metrics.unhealthyTargetCount > 0 ? "Needs review" : "Healthy"}
+        />
+        <StatCard
+          label="7-day success"
+          value={formatPercent(overview.metrics.successRate7d)}
+          meta={`${overview.metrics.projectCount} tracked projects`}
+        />
+        <StatCard
+          label="Pending approvals"
+          value={String(pendingApprovalCount)}
+          meta={pendingApprovalCount > 0 ? "Needs review" : "Nothing waiting"}
+        />
       </section>
 
-      <section className="content-grid three-up">
-        <article className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Attention</p>
-              <h3>Latest failed run</h3>
+      <section className="ao-overview-grid">
+        <div className="ao-overview-main">
+          <article className="ao-panel">
+            <div className="ao-section-header">
+              <div className="ao-section-header__copy">
+                <p className="ao-section-header__eyebrow">Needs attention</p>
+                <h2>Latest failed run</h2>
+                <p>Start here when delivery has regressed.</p>
+              </div>
+              <AlertTriangle size={18} />
             </div>
-            <AlertTriangle size={18} />
-          </div>
 
-          {overview.attention.latestFailedRun ? (
-            <div className="stack-list">
-              <div className="run-summary-card accent-danger">
-                <div className="row-spread">
-                  <strong>{overview.attention.latestFailedRun.projectName}</strong>
+            {overview.attention.latestFailedRun ? (
+              <div className="ao-attention-card">
+                <div className="ao-attention-card__head">
+                  <div className="ao-attention-card__body">
+                    <h3>{overview.attention.latestFailedRun.projectName}</h3>
+                    <p className="ao-mono">
+                      {overview.attention.latestFailedRun.branch} • {shortSha(overview.attention.latestFailedRun.commitSha)}
+                    </p>
+                    {overview.attention.latestFailedRun.errorMessage ? (
+                      <p className="ao-muted">{overview.attention.latestFailedRun.errorMessage}</p>
+                    ) : null}
+                  </div>
                   <StatusBadge status={overview.attention.latestFailedRun.status} />
                 </div>
-                <p>
-                  {overview.attention.latestFailedRun.branch} ·{" "}
-                  {shortSha(overview.attention.latestFailedRun.commitSha)}
-                </p>
-                <small>
-                  Triggered {formatRelativeTime(overview.attention.latestFailedRun.queuedAt)}
-                </small>
-                {overview.attention.latestFailedRun.errorMessage ? (
-                  <small>{overview.attention.latestFailedRun.errorMessage}</small>
-                ) : null}
+
+                <MetaList
+                  items={[
+                    {
+                      label: "Queued",
+                      value: formatDateTime(overview.attention.latestFailedRun.queuedAt)
+                    },
+                    {
+                      label: "Triggered by",
+                      value: overview.attention.latestFailedRun.triggeredBy
+                    },
+                    {
+                      label: "Source",
+                      value: overview.attention.latestFailedRun.source,
+                      mono: true
+                    }
+                  ]}
+                />
+
+                <div className="ao-inline-cluster">
+                  <button
+                    className="ao-button ao-button--primary"
+                    onClick={handleRerunLatestFailed}
+                    disabled={isRerunning}
+                  >
+                    {isRerunning ? "Queueing..." : "Rerun latest failure"}
+                  </button>
+                  <Link
+                    className="ao-link-button ao-link-button--secondary"
+                    to={`/runs?run=${overview.attention.latestFailedRun.id}`}
+                  >
+                    Inspect run
+                  </Link>
+                </div>
               </div>
-              <div className="row-actions">
-                <button onClick={handleRerunLatestFailed} disabled={isRerunning}>
-                  {isRerunning ? "Queueing..." : "Rerun Latest Failure"}
-                </button>
-                <Link className="text-link" to={`/runs?run=${overview.attention.latestFailedRun.id}`}>
-                  Inspect run
-                </Link>
+            ) : (
+              <EmptyState
+                title="No failed runs"
+                description="Recent pipeline activity is not showing a failure right now."
+              />
+            )}
+          </article>
+
+          <article className="ao-panel">
+            <div className="ao-section-header">
+              <div className="ao-section-header__copy">
+                <p className="ao-section-header__eyebrow">Recent runs</p>
+                <h2>Execution history</h2>
               </div>
-            </div>
-          ) : (
-            <EmptyState
-              title="No failed runs"
-              description="Recent pipeline activity is not showing a failure right now."
-            />
-          )}
-        </article>
-
-        <article className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Live execution</p>
-              <h3>Active runs</h3>
-            </div>
-            <Workflow size={18} />
-          </div>
-
-          {overview.attention.activeRuns.length > 0 ? (
-            <div className="stack-list">
-              {overview.attention.activeRuns.map((run) => (
-                <Link className="list-row" key={run.id} to={`/runs?run=${run.id}`}>
-                  <div>
-                    <strong>{run.projectName}</strong>
-                    <p>
-                      {run.branch} · {shortSha(run.commitSha)}
-                    </p>
-                  </div>
-                  <div className="row-end">
-                    <StatusBadge status={run.status} />
-                    <small>{formatRelativeTime(run.startedAt ?? run.queuedAt)}</small>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              title="Nothing is running"
-              description="The worker is idle at the moment. New runs will appear here."
-            />
-          )}
-        </article>
-
-        <article className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Deployment posture</p>
-              <h3>Needs attention</h3>
-            </div>
-            <Rocket size={18} />
-          </div>
-
-          {overview.attention.unhealthyTargets.length > 0 ? (
-            <div className="stack-list">
-              {overview.attention.unhealthyTargets.map((target) => (
-                <Link
-                  className="list-row"
-                  key={target.id}
-                  to={`/deployments?target=${target.id}`}
-                >
-                  <div>
-                    <strong>{target.projectName}</strong>
-                    <p>{target.name}</p>
-                  </div>
-                  <div className="row-end">
-                    <StatusBadge status={target.lastStatus} />
-                    <small>{target.lastError ?? target.lastDeployedImage ?? "Review target"}</small>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              title="Deployment health looks strong"
-              description="No known unhealthy deployment targets are being reported."
-            />
-          )}
-        </article>
-      </section>
-
-      <section className="content-grid three-up">
-        <article className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Recent runs</p>
-              <h3>Execution history</h3>
-            </div>
-            <Link className="text-link" to="/runs">
-              View all <ArrowRight size={14} />
-            </Link>
-          </div>
-          <div className="stack-list">
-            {overview.recentRuns.map((run) => (
-              <Link className="list-row" key={run.id} to={`/runs?run=${run.id}`}>
-                <div>
-                  <strong>{run.projectName}</strong>
-                  <p>
-                    {run.source} · {run.branch} · {shortSha(run.commitSha)}
-                  </p>
-                </div>
-                <div className="row-end">
-                  <StatusBadge status={run.status} />
-                  <small>{formatRelativeTime(run.queuedAt)}</small>
-                </div>
+              <Link className="ao-link" to="/runs">
+                View all <ArrowRight size={14} />
               </Link>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Recent deployments</p>
-              <h3>Revision movement</h3>
             </div>
-            <Link className="text-link" to="/deployments">
-              View all <ArrowRight size={14} />
-            </Link>
-          </div>
-          <div className="stack-list">
-            {overview.recentDeployments.map((revision) => (
-              <Link
-                className="list-row"
-                key={revision.id}
-                to={`/deployments?target=${revision.targetId}`}
-              >
-                <div>
-                  <strong>{revision.projectName}</strong>
-                  <p>{revision.targetName}</p>
-                </div>
-                <div className="row-end">
-                  <StatusBadge status={revision.status} />
-                  <small>{formatDateTime(revision.deployedAt)}</small>
-                </div>
-              </Link>
-            ))}
-          </div>
-        </article>
 
-        <article className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Recent activity</p>
-              <h3>Control-plane feed</h3>
-            </div>
-            <Link className="text-link" to="/activity">
-              View all <ArrowRight size={14} />
-            </Link>
-          </div>
-          <div className="stack-list">
-            {overview.recentActivity.map((event) => (
-              <Link className="list-row" key={event.id} to={activityLink(event)}>
-                <div>
-                  <strong>{event.title}</strong>
-                  <p>{event.description}</p>
-                </div>
-                <div className="row-end">
-                  <StatusBadge status={event.status} tone="subtle" />
-                  <small>{formatRelativeTime(event.occurredAt)}</small>
-                </div>
+            {overview.recentRuns.length > 0 ? (
+              <div className="ao-table-wrap ao-overview-table">
+                <table className="ao-table">
+                  <thead>
+                    <tr>
+                      <th>Project</th>
+                      <th>Branch</th>
+                      <th>Status</th>
+                      <th>Queued</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {overview.recentRuns.map((run) => (
+                      <tr key={run.id}>
+                        <td>
+                          <Link className="ao-link" to={`/runs?run=${run.id}`}>
+                            {run.projectName}
+                          </Link>
+                        </td>
+                        <td className="ao-mono">
+                          {run.branch} • {shortSha(run.commitSha)}
+                        </td>
+                        <td>
+                          <StatusBadge status={run.status} tone="subtle" />
+                        </td>
+                        <td className="ao-mono">{formatRelativeTime(run.queuedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState
+                title="No recent runs"
+                description="Execution history will show here as AutoOps processes work."
+              />
+            )}
+          </article>
+
+          <article className="ao-panel">
+            <div className="ao-section-header">
+              <div className="ao-section-header__copy">
+                <p className="ao-section-header__eyebrow">Recent deployments</p>
+                <h2>Revision activity</h2>
+              </div>
+              <Link className="ao-link" to="/deployments">
+                View all <ArrowRight size={14} />
               </Link>
-            ))}
-          </div>
-        </article>
+            </div>
+
+            {overview.recentDeployments.length > 0 ? (
+              <div className="ao-table-wrap ao-overview-table">
+                <table className="ao-table">
+                  <thead>
+                    <tr>
+                      <th>Project</th>
+                      <th>Target</th>
+                      <th>Status</th>
+                      <th>Deployed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {overview.recentDeployments.map((revision) => (
+                      <tr key={revision.id}>
+                        <td>
+                          <Link className="ao-link" to={`/deployments?target=${revision.targetId}`}>
+                            {revision.projectName}
+                          </Link>
+                        </td>
+                        <td className="ao-mono">
+                          {revision.targetName} • {shortSha(revision.imageDigest)}
+                        </td>
+                        <td>
+                          <StatusBadge status={revision.status} tone="subtle" />
+                        </td>
+                        <td className="ao-mono">{formatRelativeTime(revision.deployedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState
+                title="No deployment revisions yet"
+                description="Recent deployment activity will appear once targets begin receiving revisions."
+              />
+            )}
+          </article>
+        </div>
+
+        <aside className="ao-overview-side">
+          <article className="ao-panel">
+            <div className="ao-section-header">
+              <div className="ao-section-header__copy">
+                <p className="ao-section-header__eyebrow">Release approvals</p>
+                <h2>Dashboard queue</h2>
+              </div>
+              <Link className="ao-link" to="/approvals">
+                Open queue <ArrowRight size={14} />
+              </Link>
+            </div>
+
+            {pendingApprovals.length > 0 ? (
+              <div className="ao-ledger">
+                {pendingApprovals.map((approval) => (
+                  <Link className="ao-ledger__row" key={approval.id} to="/approvals">
+                    <div>
+                      <strong>
+                        {approval.sourceTargetName} to {approval.destinationTargetName}
+                      </strong>
+                      <div className="ao-ledger__meta">
+                        <span>{approval.projectName}</span>
+                        <span className="ao-mono">{shortSha(approval.sourceImageDigest)}</span>
+                      </div>
+                    </div>
+                    <div className="ao-stack ao-stack--sm">
+                      <StatusBadge status={approval.status} tone="subtle" />
+                      <span className="ao-table__secondary">
+                        {formatRelativeTime(approval.createdAt)}
+                      </span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                title="No pending approvals"
+                description="Protected release promotions waiting for review will surface here."
+              />
+            )}
+          </article>
+
+          <article className="ao-panel">
+            <div className="ao-section-header">
+              <div className="ao-section-header__copy">
+                <p className="ao-section-header__eyebrow">Live execution</p>
+                <h2>Active runs</h2>
+              </div>
+              <Workflow size={18} />
+            </div>
+
+            {overview.attention.activeRuns.length > 0 ? (
+              <div className="ao-ledger">
+                {overview.attention.activeRuns.map((run) => (
+                  <Link className="ao-ledger__row" key={run.id} to={`/runs?run=${run.id}`}>
+                    <div>
+                      <strong>{run.projectName}</strong>
+                      <div className="ao-ledger__meta">
+                        <span className="ao-mono">{run.branch}</span>
+                        <span className="ao-mono">{shortSha(run.commitSha)}</span>
+                      </div>
+                    </div>
+                    <div className="ao-stack ao-stack--sm">
+                      <StatusBadge status={run.status} />
+                      <span className="ao-table__secondary">
+                        {formatRelativeTime(run.startedAt ?? run.queuedAt)}
+                      </span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                title="Nothing is running"
+                description="The worker is idle at the moment. New runs will appear here."
+              />
+            )}
+          </article>
+
+          <article className="ao-panel">
+            <div className="ao-section-header">
+              <div className="ao-section-header__copy">
+                <p className="ao-section-header__eyebrow">Deployment posture</p>
+                <h2>Health summary</h2>
+              </div>
+              <ShieldAlert size={18} />
+            </div>
+
+            {overview.attention.unhealthyTargets.length > 0 ? (
+              <div className="ao-ledger ao-overview-health">
+                {overview.attention.unhealthyTargets.map((target) => (
+                  <Link className="ao-ledger__row ao-overview-health__row" key={target.id} to={`/deployments?target=${target.id}`}>
+                    <div className="ao-overview-health__identity">
+                      <strong>{target.projectName}</strong>
+                      <div className="ao-ledger__meta">
+                        <span>{target.name}</span>
+                        <span className="ao-mono">{target.managedDomain ?? target.service}</span>
+                      </div>
+                    </div>
+                    <div className="ao-stack ao-stack--sm ao-overview-health__status">
+                      <StatusBadge status={target.lastStatus} />
+                      <span
+                        className="ao-table__secondary ao-overview-health__error"
+                        title={target.lastError ?? undefined}
+                      >
+                        {formatFailureSummary(target.lastError)}
+                      </span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                title="Deployment health looks strong"
+                description="No known unhealthy deployment targets are being reported."
+              />
+            )}
+          </article>
+
+          <article className="ao-panel">
+            <div className="ao-section-header">
+              <div className="ao-section-header__copy">
+                <p className="ao-section-header__eyebrow">Recent activity</p>
+                <h2>Control-plane feed</h2>
+              </div>
+              <Rocket size={18} />
+            </div>
+
+            {overview.recentActivity.length > 0 ? (
+              <div className="ao-ledger">
+                {overview.recentActivity.map((event) => (
+                  <Link className="ao-ledger__row" key={event.id} to={activityLink(event)}>
+                    <div>
+                      <strong>{event.title}</strong>
+                      <div className="ao-ledger__meta">
+                        <span>{event.description}</span>
+                      </div>
+                    </div>
+                    <div className="ao-stack ao-stack--sm">
+                      <StatusBadge status={event.status} tone="subtle" />
+                      <span className="ao-table__secondary">{formatRelativeTime(event.occurredAt)}</span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                title="No recent activity"
+                description="Audit and webhook events will appear here."
+              />
+            )}
+          </article>
+        </aside>
       </section>
     </div>
   );
 }
 
-function MetricCard(props: {
+function StatCard(props: {
   label: string;
   value: string;
-  tone?: "default" | "success" | "danger";
+  meta: string;
 }) {
   return (
-    <div className={`metric-card tone-${props.tone ?? "default"}`}>
-      <span>{props.label}</span>
-      <strong>{props.value}</strong>
+    <div className="ao-stat">
+      <span className="ao-stat__label">{props.label}</span>
+      <strong className="ao-stat__value">{props.value}</strong>
+      <span className="ao-stat__meta">{props.meta}</span>
     </div>
   );
 }
@@ -338,11 +510,14 @@ function activityLink(event: DashboardOverview["recentActivity"][number]) {
   if (event.runId) {
     return `/runs?run=${event.runId}`;
   }
+
   if (event.targetId) {
     return `/deployments?target=${event.targetId}`;
   }
+
   if (event.projectId) {
     return `/projects/${event.projectId}`;
   }
+
   return "/activity";
 }

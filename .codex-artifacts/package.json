@@ -1,0 +1,9 @@
+{
+  "name": "autoops-paper-assets",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pdfkit": "^0.18.0",
+    "playwright": "^1.59.1"
+  }
+}

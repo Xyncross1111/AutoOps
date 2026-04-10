@@ -1,0 +1,72 @@
+.ao-button,
+.ao-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.ao-button:disabled,
+.ao-link-button[aria-disabled="true"] {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.ao-button--primary,
+.ao-link-button--primary {
+  background: var(--button-primary-bg);
+  color: var(--button-primary-fg);
+  box-shadow: var(--shadow-xs);
+}
+
+.ao-button--primary:hover,
+.ao-link-button--primary:hover {
+  background: color-mix(in srgb, var(--button-primary-bg) 88%, var(--accent));
+}
+
+.ao-button--secondary,
+.ao-link-button--secondary {
+  border-color: var(--button-secondary-border);
+  background: var(--button-secondary-bg);
+  color: var(--button-secondary-fg);
+}
+
+.ao-button--secondary:hover,
+.ao-link-button--secondary:hover {
+  background: var(--surface-2);
+}
+
+.ao-button--danger,
+.ao-link-button--danger {
+  border-color: color-mix(in srgb, var(--danger) 26%, var(--border-default));
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+}
+
+.ao-button--danger:hover,
+.ao-link-button--danger:hover {
+  background: color-mix(in srgb, var(--danger-soft) 74%, var(--danger) 10%);
+}
+
+.ao-button--ghost {
+  color: var(--text-2);
+}
+
+.ao-button--ghost:hover {
+  color: var(--text-1);
+  background: var(--surface-2);
+}
+
+.ao-button.is-active {
+  border-color: var(--border-contrast);
+  background: var(--surface-3);
+  color: var(--text-1);
+}

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(libreoffice --headless --convert-to pdf /opt/AutoOps/results-assets/AutoOps-speaking-script-plain.docx)",
+      "Bash(pandoc AutoOps-speaking-script-plain.md -o AutoOps-speaking-script-plain.html --standalone --metadata title=\"AutoOps Speaking Script\")",
+      "Bash(weasyprint AutoOps-speaking-script-plain.html AutoOps-speaking-script-plain.pdf)"
+    ]
+  }
+}

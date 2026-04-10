@@ -2,8 +2,9 @@ import type { ReactNode } from "react";
 
 export function LoadingBlock(props: { label?: string }) {
   return (
-    <div className="state-block loading-block">
-      <div className="loading-pulse" />
+    <div className="ao-state ao-state--loading" role="status" aria-live="polite">
+      <div className="ao-skeleton ao-skeleton--line ao-state__skeleton" />
+      <div className="ao-skeleton ao-skeleton--line ao-state__skeleton ao-state__skeleton--short" />
       <p>{props.label ?? "Loading..."}</p>
     </div>
   );
@@ -15,10 +16,10 @@ export function EmptyState(props: {
   action?: ReactNode;
 }) {
   return (
-    <div className="state-block empty-state">
+    <div className="ao-state ao-state--empty">
       <h3>{props.title}</h3>
       <p>{props.description}</p>
-      {props.action ? <div className="state-action">{props.action}</div> : null}
+      {props.action ? <div className="ao-state__action">{props.action}</div> : null}
     </div>
   );
 }
@@ -29,10 +30,10 @@ export function InlineError(props: {
   action?: ReactNode;
 }) {
   return (
-    <div className="error-banner">
+    <div className="ao-inline-message ao-inline-message--error" role="alert">
       <strong>{props.title ?? "Something went wrong"}</strong>
       <span>{props.message}</span>
-      {props.action ? <div className="state-action">{props.action}</div> : null}
+      {props.action ? <div className="ao-state__action">{props.action}</div> : null}
     </div>
   );
 }

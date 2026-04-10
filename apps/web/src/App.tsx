@@ -3,8 +3,9 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { AppSessionContext } from "./app-context";
 import { AppShell } from "./components/AppShell";
-import { getAuthMe } from "./lib/api";
+import { getAuthMe, getGitHubAccount, listGitHubInstallations } from "./lib/api";
 import { ActivityPage } from "./pages/ActivityPage";
+import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { DeploymentsPage } from "./pages/DeploymentsPage";
 import { GitHubConnectCallbackPage } from "./pages/GitHubConnectCallbackPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -33,6 +34,9 @@ export function App() {
     return "light";
   });
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [githubConnectionState, setGitHubConnectionState] = useState<
+    "unknown" | "connected" | "disconnected"
+  >(() => (token ? "unknown" : "disconnected"));
 
   useEffect(() => {
     if (token) {
@@ -57,6 +61,7 @@ export function App() {
 
   useEffect(() => {
     if (!token) {
+      setGitHubConnectionState("disconnected");
       return;
     }
 
@@ -77,6 +82,42 @@ export function App() {
       active = false;
     };
   }, [token]);
+
+  useEffect(() => {
+    if (!token) {
+      setGitHubConnectionState("disconnected");
+      return;
+    }
+
+    let active = true;
+    setGitHubConnectionState("unknown");
+
+    void Promise.allSettled([getGitHubAccount(token), listGitHubInstallations(token)])
+      .then(([accountResult, installationsResult]) => {
+        if (!active) {
+          return;
+        }
+
+        const hasOAuthConnection =
+          accountResult.status === "fulfilled" && Boolean(accountResult.value.account);
+        const hasInstallationConnection =
+          installationsResult.status === "fulfilled" &&
+          installationsResult.value.installations.length > 0;
+
+        setGitHubConnectionState(
+          hasOAuthConnection || hasInstallationConnection ? "connected" : "disconnected"
+        );
+      })
+      .catch(() => {
+        if (active) {
+          setGitHubConnectionState("disconnected");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [refreshNonce, token]);
 
   function handleAuthenticated(nextToken: string, email: string) {
     setToken(nextToken);
@@ -128,14 +169,16 @@ export function App() {
                   onRefresh={refreshApp}
                   onLogout={handleLogout}
                   onToggleTheme={handleThemeToggle}
+                  showGitHubConnect={githubConnectionState === "disconnected"}
                 />
               ) : (
-                <Navigate replace to="/login" />
+                <LoginPage onAuthenticated={handleAuthenticated} />
               )
             }
           >
             <Route index element={<OverviewPage />} />
             <Route path="runs" element={<RunsPage />} />
+            <Route path="approvals" element={<ApprovalsPage />} />
             <Route path="deployments" element={<DeploymentsPage />} />
             <Route path="github/connect/callback" element={<GitHubConnectCallbackPage />} />
             <Route path="repositories" element={<RepositoriesPage />} />

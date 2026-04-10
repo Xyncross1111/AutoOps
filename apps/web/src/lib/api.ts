@@ -9,6 +9,7 @@ import type {
   GitHubRepositorySummary,
   GitHubUserRepositorySummary,
   PipelineRunSummary,
+  PromotionApprovalSummary,
   ProjectDetail,
   ProjectInstallationSummary,
   ProjectSummary,
@@ -19,8 +20,14 @@ import type {
   StageRun
 } from "@autoops/core";
 
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+
 export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
+  configuredApiBaseUrl && configuredApiBaseUrl.length > 0
+    ? configuredApiBaseUrl
+    : typeof window !== "undefined"
+      ? window.location.origin
+      : "http://localhost:4000";
 
 export interface LoginResponse {
   token: string;
@@ -48,6 +55,12 @@ export interface RunDetail {
 export interface DeploymentsIndex {
   targets: DeploymentTargetSummary[];
   revisions: DeploymentRevisionSummary[];
+}
+
+export interface PromotionResponse {
+  mode: "approval_required" | "queued";
+  approval?: PromotionApprovalSummary;
+  run?: PipelineRunSummary;
 }
 
 function buildUrl(path: string, query?: Record<string, string | number | boolean | undefined>) {
@@ -138,6 +151,12 @@ export function updateProject(
   });
 }
 
+export function deleteProject(token: string, projectId: string) {
+  return fetchJson<{ project: ProjectSummary }>(`/api/projects/${projectId}`, token, {
+    method: "DELETE"
+  });
+}
+
 export function listRuns(token: string, filters: RunListFilters = {}) {
   return fetchJson<{ runs: PipelineRunSummary[] }>(
     "/api/runs",
@@ -170,6 +189,66 @@ export function rollbackToRevision(token: string, input: Omit<RollbackRequest, "
     method: "POST",
     body: JSON.stringify(input)
   });
+}
+
+export function createPromotion(
+  token: string,
+  input: {
+    sourceRevisionId: string;
+    destinationTargetId: string;
+    comment?: string;
+  }
+) {
+  return fetchJson<PromotionResponse>("/api/promotions", token, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export function listApprovals(
+  token: string,
+  query: {
+    projectId?: string;
+    status?: "pending" | "approved" | "rejected";
+    limit?: number;
+  } = {}
+) {
+  return fetchJson<{ approvals: PromotionApprovalSummary[] }>(
+    "/api/approvals",
+    token,
+    {},
+    query
+  );
+}
+
+export function approveApproval(
+  token: string,
+  approvalId: string,
+  input: { comment?: string } = {}
+) {
+  return fetchJson<{ approval: PromotionApprovalSummary | null; run: PipelineRunSummary }>(
+    `/api/approvals/${approvalId}/approve`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    }
+  );
+}
+
+export function rejectApproval(
+  token: string,
+  approvalId: string,
+  input: { comment?: string } = {}
+) {
+  return fetchJson<{ approval: PromotionApprovalSummary | null }>(
+    `/api/approvals/${approvalId}/reject`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    }
+  );
 }
 
 export function listActivity(
@@ -267,8 +346,17 @@ export function listGitHubUserRepositories(token: string) {
   );
 }
 
-export function deployManagedProject(token: string, projectId: string) {
-  return fetchJson<{ run: PipelineRunSummary }>(`/api/projects/${projectId}/deploy`, token, {
-    method: "POST"
-  });
+export function deployManagedProject(
+  token: string,
+  projectId: string,
+  input: { branch?: string } = {}
+) {
+  return fetchJson<{ run: PipelineRunSummary; target?: DeploymentTargetSummary }>(
+    `/api/projects/${projectId}/deploy`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    }
+  );
 }

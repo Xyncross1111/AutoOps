@@ -5,6 +5,7 @@ import { Pool, type PoolClient } from "pg";
 import type {
   ActivityEvent,
   DashboardOverview,
+  DeploymentEnvironment,
   DeploymentRevisionSummary,
   DeploymentTargetDetail,
   DeploymentTargetType,
@@ -16,6 +17,8 @@ import type {
   ManagedNextjsConfig,
   PipelineConfig,
   PipelineRunSummary,
+  PromotionApprovalStatus,
+  PromotionApprovalSummary,
   ProjectDetail,
   ProjectMode,
   ProjectInstallationSummary,
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS github_repositories (
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
   full_name TEXT NOT NULL,
+  description TEXT,
   default_branch TEXT NOT NULL,
   is_private BOOLEAN NOT NULL,
   is_archived BOOLEAN NOT NULL DEFAULT FALSE,
@@ -178,6 +182,9 @@ CREATE TABLE IF NOT EXISTS deployment_targets (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   target_type TEXT NOT NULL DEFAULT 'ssh_compose',
+  environment TEXT,
+  promotion_order INTEGER,
+  is_protected BOOLEAN NOT NULL DEFAULT FALSE,
   host_ref TEXT NOT NULL,
   compose_file TEXT NOT NULL,
   service TEXT NOT NULL,
@@ -207,6 +214,31 @@ CREATE TABLE IF NOT EXISTS deployment_revisions (
 
 CREATE INDEX IF NOT EXISTS idx_deployment_revisions_target
   ON deployment_revisions (target_id, deployed_at DESC);
+
+CREATE TABLE IF NOT EXISTS promotion_approvals (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  source_revision_id TEXT NOT NULL REFERENCES deployment_revisions(id) ON DELETE CASCADE,
+  source_target_id TEXT NOT NULL REFERENCES deployment_targets(id) ON DELETE CASCADE,
+  destination_target_id TEXT NOT NULL REFERENCES deployment_targets(id) ON DELETE CASCADE,
+  source_image_ref TEXT NOT NULL,
+  source_image_digest TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  decided_by TEXT,
+  request_comment TEXT,
+  decision_comment TEXT,
+  status TEXT NOT NULL,
+  queued_run_id TEXT REFERENCES pipeline_runs(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  decided_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_approvals_project_created
+  ON promotion_approvals (project_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_promotion_approvals_pending_unique
+  ON promotion_approvals (source_revision_id, destination_target_id)
+  WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS rollback_events (
   id TEXT PRIMARY KEY,
@@ -245,9 +277,37 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS generated_config JSONB;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_email TEXT;
 
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS target_type TEXT NOT NULL DEFAULT 'ssh_compose';
+ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS environment TEXT;
+ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS promotion_order INTEGER;
+ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS is_protected BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_port INTEGER;
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_runtime_dir TEXT;
 ALTER TABLE deployment_targets ADD COLUMN IF NOT EXISTS managed_domain TEXT;
+ALTER TABLE github_repositories ADD COLUMN IF NOT EXISTS description TEXT;
+
+UPDATE deployment_targets
+SET
+  environment = CASE
+    WHEN target_type = 'managed_vps' AND (name = 'managed-vps' OR name = 'production') THEN 'production'
+    WHEN target_type = 'managed_vps' AND name LIKE 'preview:%' THEN 'preview'
+    ELSE environment
+  END,
+  promotion_order = CASE
+    WHEN target_type = 'managed_vps' AND (name = 'managed-vps' OR name = 'production') THEN 2
+    WHEN target_type = 'managed_vps' AND name LIKE 'preview:%' THEN 1
+    ELSE promotion_order
+  END,
+  is_protected = CASE
+    WHEN target_type = 'managed_vps' AND (name = 'managed-vps' OR name = 'production') THEN TRUE
+    WHEN target_type = 'managed_vps' AND name LIKE 'preview:%' THEN FALSE
+    ELSE is_protected
+  END
+WHERE target_type = 'managed_vps'
+  AND (
+    environment IS NULL
+    OR promotion_order IS NULL
+    OR (name = 'managed-vps' OR name = 'production' OR name LIKE 'preview:%')
+  );
 
 CREATE INDEX IF NOT EXISTS idx_projects_owner_email
   ON projects (owner_email);
@@ -312,6 +372,9 @@ interface DeploymentTargetRow {
   project_name: string;
   name: string;
   target_type: DeploymentTargetType;
+  environment: DeploymentEnvironment | null;
+  promotion_order: number | null;
+  is_protected: boolean;
   host_ref: string;
   compose_file: string;
   service: string;
@@ -332,11 +395,38 @@ interface DeploymentRevisionRow {
   project_id: string;
   project_name: string;
   run_id: string | null;
+  run_source: RunSource | null;
   image_ref: string;
   image_digest: string;
   status: string;
   deployed_at: string;
   rollback_of_revision_id: string | null;
+  promoted_from_revision_id: string | null;
+  promoted_from_target_id: string | null;
+  promoted_from_target_name: string | null;
+  promotion_approval_id: string | null;
+  promotion_approval_status: PromotionApprovalStatus | null;
+}
+
+interface PromotionApprovalRow {
+  id: string;
+  project_id: string;
+  project_name: string;
+  source_revision_id: string;
+  source_target_id: string;
+  source_target_name: string;
+  destination_target_id: string;
+  destination_target_name: string;
+  source_image_ref: string;
+  source_image_digest: string;
+  requested_by: string;
+  decided_by: string | null;
+  request_comment: string | null;
+  decision_comment: string | null;
+  status: PromotionApprovalStatus;
+  queued_run_id: string | null;
+  created_at: string;
+  decided_at: string | null;
 }
 
 interface InstallationRow {
@@ -356,6 +446,7 @@ interface GitHubRepositoryRow {
   owner: string;
   name: string;
   full_name: string;
+  description: string | null;
   default_branch: string;
   is_private: boolean;
   is_archived: boolean;
@@ -834,6 +925,48 @@ export class AutoOpsDb {
     return this.getProject(projectId, ownerEmail);
   }
 
+  async deleteProject(projectId: string, ownerEmail?: string): Promise<ProjectSummary | null> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const existingResult = await client.query<ProjectRow>(
+        `
+          SELECT p.*
+          FROM projects p
+          WHERE p.id = $1
+          ${ownerEmail ? "AND p.owner_email = $2" : ""}
+          LIMIT 1
+        `,
+        ownerEmail ? [projectId, ownerEmail] : [projectId]
+      );
+
+      const existing = existingResult.rows[0];
+      if (!existing) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      await client.query(
+        `
+          DELETE FROM projects
+          WHERE id = $1
+          ${ownerEmail ? "AND owner_email = $2" : ""}
+        `,
+        ownerEmail ? [projectId, ownerEmail] : [projectId]
+      );
+
+      await client.query("COMMIT");
+      return mapProjectSummary(existing);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async upsertProjectSecret(
     projectId: string,
     name: string,
@@ -1050,6 +1183,7 @@ export class AutoOpsDb {
       owner: string;
       name: string;
       fullName: string;
+      description: string | null;
       defaultBranch: string;
       isPrivate: boolean;
       isArchived: boolean;
@@ -1072,6 +1206,7 @@ export class AutoOpsDb {
             owner,
             name,
             full_name,
+            description,
             default_branch,
             is_private,
             is_archived,
@@ -1086,13 +1221,14 @@ export class AutoOpsDb {
             synced_at
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13, $14, $15, $16, NOW()
+            $11, $12, $13, $14, $15, $16, $17, NOW()
           )
           ON CONFLICT (installation_id, github_repo_id)
           DO UPDATE SET
             owner = EXCLUDED.owner,
             name = EXCLUDED.name,
             full_name = EXCLUDED.full_name,
+            description = EXCLUDED.description,
             default_branch = EXCLUDED.default_branch,
             is_private = EXCLUDED.is_private,
             is_archived = EXCLUDED.is_archived,
@@ -1113,6 +1249,7 @@ export class AutoOpsDb {
           repository.owner,
           repository.name,
           repository.fullName,
+          repository.description,
           repository.defaultBranch,
           repository.isPrivate,
           repository.isArchived,
@@ -1142,7 +1279,7 @@ export class AutoOpsDb {
     if (filters.search) {
       values.push(`%${filters.search.toLowerCase()}%`);
       clauses.push(
-        `(LOWER(owner) LIKE $${values.length} OR LOWER(name) LIKE $${values.length} OR LOWER(full_name) LIKE $${values.length})`
+        `(LOWER(owner) LIKE $${values.length} OR LOWER(name) LIKE $${values.length} OR LOWER(full_name) LIKE $${values.length} OR LOWER(COALESCE(description, '')) LIKE $${values.length})`
       );
     }
     if (filters.deployable === true) {
@@ -1161,6 +1298,7 @@ export class AutoOpsDb {
           owner,
           name,
           full_name,
+          description,
           default_branch,
           is_private,
           is_archived,
@@ -1196,6 +1334,7 @@ export class AutoOpsDb {
           owner,
           name,
           full_name,
+          description,
           default_branch,
           is_private,
           is_archived,
@@ -1227,6 +1366,7 @@ export class AutoOpsDb {
           owner,
           name,
           full_name,
+          description,
           default_branch,
           is_private,
           is_archived,
@@ -1792,6 +1932,9 @@ export class AutoOpsDb {
     targets: Array<{
       name: string;
       targetType?: DeploymentTargetType;
+      environment?: DeploymentEnvironment | null;
+      promotionOrder?: number | null;
+      protected?: boolean;
       hostRef: string;
       composeFile: string;
       service: string;
@@ -1809,6 +1952,9 @@ export class AutoOpsDb {
             project_id,
             name,
             target_type,
+            environment,
+            promotion_order,
+            is_protected,
             host_ref,
             compose_file,
             service,
@@ -1817,10 +1963,13 @@ export class AutoOpsDb {
             managed_runtime_dir,
             managed_domain
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
           ON CONFLICT (project_id, name)
           DO UPDATE SET
             target_type = EXCLUDED.target_type,
+            environment = EXCLUDED.environment,
+            promotion_order = EXCLUDED.promotion_order,
+            is_protected = EXCLUDED.is_protected,
             host_ref = EXCLUDED.host_ref,
             compose_file = EXCLUDED.compose_file,
             service = EXCLUDED.service,
@@ -1835,6 +1984,9 @@ export class AutoOpsDb {
           projectId,
           target.name,
           target.targetType ?? "ssh_compose",
+          target.environment ?? null,
+          target.promotionOrder ?? null,
+          target.protected ?? false,
           target.hostRef,
           target.composeFile,
           target.service,
@@ -1871,6 +2023,9 @@ export class AutoOpsDb {
           p.name AS project_name,
           t.name,
           t.target_type,
+          t.environment,
+          t.promotion_order,
+          t.is_protected,
           t.host_ref,
           t.compose_file,
           t.service,
@@ -1885,7 +2040,7 @@ export class AutoOpsDb {
         FROM deployment_targets t
         INNER JOIN projects p ON p.id = t.project_id
         ${where}
-        ORDER BY p.name ASC, t.name ASC
+        ORDER BY p.name ASC, COALESCE(t.promotion_order, 999999) ASC, t.name ASC
       `,
       values
     );
@@ -1904,6 +2059,9 @@ export class AutoOpsDb {
           p.name AS project_name,
           t.name,
           t.target_type,
+          t.environment,
+          t.promotion_order,
+          t.is_protected,
           t.host_ref,
           t.compose_file,
           t.service,
@@ -2006,14 +2164,25 @@ export class AutoOpsDb {
           t.project_id,
           p.name AS project_name,
           r.run_id,
+          pr.source AS run_source,
           r.image_ref,
           r.image_digest,
           r.status,
           r.deployed_at,
-          r.rollback_of_revision_id
+          r.rollback_of_revision_id,
+          pr.metadata -> 'manualPromotion' ->> 'sourceRevisionId' AS promoted_from_revision_id,
+          pr.metadata -> 'manualPromotion' ->> 'sourceTargetId' AS promoted_from_target_id,
+          promoted_target.name AS promoted_from_target_name,
+          pr.metadata -> 'manualPromotion' ->> 'approvalId' AS promotion_approval_id,
+          approval.status AS promotion_approval_status
         FROM deployment_revisions r
         INNER JOIN deployment_targets t ON t.id = r.target_id
         INNER JOIN projects p ON p.id = t.project_id
+        LEFT JOIN pipeline_runs pr ON pr.id = r.run_id
+        LEFT JOIN deployment_targets promoted_target
+          ON promoted_target.id = pr.metadata -> 'manualPromotion' ->> 'sourceTargetId'
+        LEFT JOIN promotion_approvals approval
+          ON approval.id = pr.metadata -> 'manualPromotion' ->> 'approvalId'
         WHERE r.id = $1
       `,
       [revisionId]
@@ -2034,14 +2203,25 @@ export class AutoOpsDb {
           t.project_id,
           p.name AS project_name,
           r.run_id,
+          pr.source AS run_source,
           r.image_ref,
           r.image_digest,
           r.status,
           r.deployed_at,
-          r.rollback_of_revision_id
+          r.rollback_of_revision_id,
+          pr.metadata -> 'manualPromotion' ->> 'sourceRevisionId' AS promoted_from_revision_id,
+          pr.metadata -> 'manualPromotion' ->> 'sourceTargetId' AS promoted_from_target_id,
+          promoted_target.name AS promoted_from_target_name,
+          pr.metadata -> 'manualPromotion' ->> 'approvalId' AS promotion_approval_id,
+          approval.status AS promotion_approval_status
         FROM deployment_revisions r
         INNER JOIN deployment_targets t ON t.id = r.target_id
         INNER JOIN projects p ON p.id = t.project_id
+        LEFT JOIN pipeline_runs pr ON pr.id = r.run_id
+        LEFT JOIN deployment_targets promoted_target
+          ON promoted_target.id = pr.metadata -> 'manualPromotion' ->> 'sourceTargetId'
+        LEFT JOIN promotion_approvals approval
+          ON approval.id = pr.metadata -> 'manualPromotion' ->> 'approvalId'
         ${ownerEmail ? "WHERE p.owner_email = $2" : ""}
         ORDER BY r.deployed_at DESC
         LIMIT $1
@@ -2064,14 +2244,25 @@ export class AutoOpsDb {
           t.project_id,
           p.name AS project_name,
           r.run_id,
+          pr.source AS run_source,
           r.image_ref,
           r.image_digest,
           r.status,
           r.deployed_at,
-          r.rollback_of_revision_id
+          r.rollback_of_revision_id,
+          pr.metadata -> 'manualPromotion' ->> 'sourceRevisionId' AS promoted_from_revision_id,
+          pr.metadata -> 'manualPromotion' ->> 'sourceTargetId' AS promoted_from_target_id,
+          promoted_target.name AS promoted_from_target_name,
+          pr.metadata -> 'manualPromotion' ->> 'approvalId' AS promotion_approval_id,
+          approval.status AS promotion_approval_status
         FROM deployment_revisions r
         INNER JOIN deployment_targets t ON t.id = r.target_id
         INNER JOIN projects p ON p.id = t.project_id
+        LEFT JOIN pipeline_runs pr ON pr.id = r.run_id
+        LEFT JOIN deployment_targets promoted_target
+          ON promoted_target.id = pr.metadata -> 'manualPromotion' ->> 'sourceTargetId'
+        LEFT JOIN promotion_approvals approval
+          ON approval.id = pr.metadata -> 'manualPromotion' ->> 'approvalId'
         WHERE r.target_id = $1
           ${ownerEmail ? "AND p.owner_email = $2" : ""}
         ORDER BY r.deployed_at DESC
@@ -2116,6 +2307,232 @@ export class AutoOpsDb {
       revisions,
       linkedRuns
     };
+  }
+
+  async listPromotionApprovals(
+    input: {
+      status?: PromotionApprovalStatus;
+      projectId?: string;
+      limit?: number;
+    } = {},
+    ownerEmail?: string
+  ): Promise<PromotionApprovalSummary[]> {
+    const values: unknown[] = [];
+    const clauses: string[] = [];
+
+    if (input.status) {
+      values.push(input.status);
+      clauses.push(`approval.status = $${values.length}`);
+    }
+    if (input.projectId) {
+      values.push(input.projectId);
+      clauses.push(`approval.project_id = $${values.length}`);
+    }
+    if (ownerEmail) {
+      values.push(ownerEmail);
+      clauses.push(`project.owner_email = $${values.length}`);
+    }
+
+    const limit = input.limit ?? 50;
+    values.push(limit);
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+
+    const result = await this.pool.query<PromotionApprovalRow>(
+      `
+        SELECT
+          approval.id,
+          approval.project_id,
+          project.name AS project_name,
+          approval.source_revision_id,
+          approval.source_target_id,
+          source_target.name AS source_target_name,
+          approval.destination_target_id,
+          destination_target.name AS destination_target_name,
+          approval.source_image_ref,
+          approval.source_image_digest,
+          approval.requested_by,
+          approval.decided_by,
+          approval.request_comment,
+          approval.decision_comment,
+          approval.status,
+          approval.queued_run_id,
+          approval.created_at,
+          approval.decided_at
+        FROM promotion_approvals approval
+        INNER JOIN projects project ON project.id = approval.project_id
+        INNER JOIN deployment_targets source_target ON source_target.id = approval.source_target_id
+        INNER JOIN deployment_targets destination_target
+          ON destination_target.id = approval.destination_target_id
+        ${where}
+        ORDER BY
+          CASE WHEN approval.status = 'pending' THEN 0 ELSE 1 END,
+          COALESCE(approval.decided_at, approval.created_at) DESC
+        LIMIT $${values.length}
+      `,
+      values
+    );
+
+    return result.rows.map(mapPromotionApprovalSummary);
+  }
+
+  async getPromotionApproval(
+    approvalId: string,
+    ownerEmail?: string
+  ): Promise<PromotionApprovalSummary | null> {
+    const result = await this.pool.query<PromotionApprovalRow>(
+      `
+        SELECT
+          approval.id,
+          approval.project_id,
+          project.name AS project_name,
+          approval.source_revision_id,
+          approval.source_target_id,
+          source_target.name AS source_target_name,
+          approval.destination_target_id,
+          destination_target.name AS destination_target_name,
+          approval.source_image_ref,
+          approval.source_image_digest,
+          approval.requested_by,
+          approval.decided_by,
+          approval.request_comment,
+          approval.decision_comment,
+          approval.status,
+          approval.queued_run_id,
+          approval.created_at,
+          approval.decided_at
+        FROM promotion_approvals approval
+        INNER JOIN projects project ON project.id = approval.project_id
+        INNER JOIN deployment_targets source_target ON source_target.id = approval.source_target_id
+        INNER JOIN deployment_targets destination_target
+          ON destination_target.id = approval.destination_target_id
+        WHERE approval.id = $1
+          ${ownerEmail ? "AND project.owner_email = $2" : ""}
+      `,
+      ownerEmail ? [approvalId, ownerEmail] : [approvalId]
+    );
+
+    return result.rows[0] ? mapPromotionApprovalSummary(result.rows[0]) : null;
+  }
+
+  async findPendingPromotionApproval(
+    sourceRevisionId: string,
+    destinationTargetId: string,
+    ownerEmail?: string
+  ): Promise<PromotionApprovalSummary | null> {
+    const result = await this.pool.query<PromotionApprovalRow>(
+      `
+        SELECT
+          approval.id,
+          approval.project_id,
+          project.name AS project_name,
+          approval.source_revision_id,
+          approval.source_target_id,
+          source_target.name AS source_target_name,
+          approval.destination_target_id,
+          destination_target.name AS destination_target_name,
+          approval.source_image_ref,
+          approval.source_image_digest,
+          approval.requested_by,
+          approval.decided_by,
+          approval.request_comment,
+          approval.decision_comment,
+          approval.status,
+          approval.queued_run_id,
+          approval.created_at,
+          approval.decided_at
+        FROM promotion_approvals approval
+        INNER JOIN projects project ON project.id = approval.project_id
+        INNER JOIN deployment_targets source_target ON source_target.id = approval.source_target_id
+        INNER JOIN deployment_targets destination_target
+          ON destination_target.id = approval.destination_target_id
+        WHERE approval.source_revision_id = $1
+          AND approval.destination_target_id = $2
+          AND approval.status = 'pending'
+          ${ownerEmail ? "AND project.owner_email = $3" : ""}
+        LIMIT 1
+      `,
+      ownerEmail
+        ? [sourceRevisionId, destinationTargetId, ownerEmail]
+        : [sourceRevisionId, destinationTargetId]
+    );
+
+    return result.rows[0] ? mapPromotionApprovalSummary(result.rows[0]) : null;
+  }
+
+  async createPromotionApproval(input: {
+    projectId: string;
+    sourceRevisionId: string;
+    sourceTargetId: string;
+    destinationTargetId: string;
+    sourceImageRef: string;
+    sourceImageDigest: string;
+    requestedBy: string;
+    requestComment?: string | null;
+  }): Promise<PromotionApprovalSummary> {
+    const id = randomUUID();
+    await this.pool.query(
+      `
+        INSERT INTO promotion_approvals (
+          id,
+          project_id,
+          source_revision_id,
+          source_target_id,
+          destination_target_id,
+          source_image_ref,
+          source_image_digest,
+          requested_by,
+          request_comment,
+          status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
+      `,
+      [
+        id,
+        input.projectId,
+        input.sourceRevisionId,
+        input.sourceTargetId,
+        input.destinationTargetId,
+        input.sourceImageRef,
+        input.sourceImageDigest,
+        input.requestedBy,
+        input.requestComment ?? null
+      ]
+    );
+
+    const approval = await this.getPromotionApproval(id);
+    if (!approval) {
+      throw new Error("Failed to load created promotion approval.");
+    }
+    return approval;
+  }
+
+  async decidePromotionApproval(input: {
+    approvalId: string;
+    status: Exclude<PromotionApprovalStatus, "pending">;
+    decidedBy: string;
+    decisionComment?: string | null;
+    queuedRunId?: string | null;
+  }): Promise<PromotionApprovalSummary | null> {
+    await this.pool.query(
+      `
+        UPDATE promotion_approvals
+        SET status = $2,
+            decided_by = $3,
+            decision_comment = $4,
+            queued_run_id = COALESCE($5, queued_run_id),
+            decided_at = NOW()
+        WHERE id = $1
+      `,
+      [
+        input.approvalId,
+        input.status,
+        input.decidedBy,
+        input.decisionComment ?? null,
+        input.queuedRunId ?? null
+      ]
+    );
+
+    return this.getPromotionApproval(input.approvalId);
   }
 
   async listActivityEvents(input: {
@@ -2218,12 +2635,14 @@ export class AutoOpsDb {
       queuedRunCountResult,
       runningRunCountResult,
       successRateResult,
+      pendingApprovalCountResult,
       recentRuns,
       recentDeployments,
       recentActivity,
       activeRuns,
       latestFailedRun,
-      deploymentTargets
+      deploymentTargets,
+      pendingApprovals
     ] = await Promise.all([
       this.pool.query<{ count: string }>(
         `
@@ -2270,12 +2689,23 @@ export class AutoOpsDb {
         ,
         ownerEmail ? [ownerEmail] : []
       ),
+      this.pool.query<{ count: string }>(
+        `
+          SELECT COUNT(*)::text AS count
+          FROM promotion_approvals approval
+          INNER JOIN projects project ON project.id = approval.project_id
+          WHERE approval.status = 'pending'
+          ${ownerEmail ? "AND project.owner_email = $1" : ""}
+        `,
+        ownerEmail ? [ownerEmail] : []
+      ),
       this.listRuns({ limit: 8 }, ownerEmail),
       this.listDeploymentRevisions(6, ownerEmail),
       this.listActivityEvents({ limit: 8 }, ownerEmail),
       this.listRuns({ status: "running", limit: 5 }, ownerEmail),
       this.listRuns({ status: "failed", limit: 1 }, ownerEmail),
-      this.listDeploymentTargets(undefined, ownerEmail)
+      this.listDeploymentTargets(undefined, ownerEmail),
+      this.listPromotionApprovals({ status: "pending", limit: 5 }, ownerEmail)
     ]);
 
     const allUnhealthyTargets = deploymentTargets.filter(
@@ -2292,12 +2722,14 @@ export class AutoOpsDb {
         queuedRunCount: Number(queuedRunCountResult.rows[0]?.count ?? "0"),
         runningRunCount: Number(runningRunCountResult.rows[0]?.count ?? "0"),
         successRate7d: totalCompleted > 0 ? Math.round((succeeded / totalCompleted) * 100) : 0,
-        unhealthyTargetCount: allUnhealthyTargets.length
+        unhealthyTargetCount: allUnhealthyTargets.length,
+        pendingApprovalCount: Number(pendingApprovalCountResult.rows[0]?.count ?? "0")
       },
       attention: {
         latestFailedRun: latestFailedRun[0] ?? null,
         activeRuns,
-        unhealthyTargets
+        unhealthyTargets,
+        pendingApprovals
       },
       recentRuns,
       recentDeployments,
@@ -2472,6 +2904,9 @@ function mapDeploymentTargetSummary(
     projectName: row.project_name,
     name: row.name,
     targetType: row.target_type,
+    environment: row.environment,
+    promotionOrder: row.promotion_order === null ? null : Number(row.promotion_order),
+    protected: Boolean(row.is_protected),
     hostRef: row.host_ref,
     composeFile: row.compose_file,
     service: row.service,
@@ -2496,11 +2931,42 @@ function mapDeploymentRevisionSummary(
     projectId: row.project_id,
     projectName: row.project_name,
     runId: row.run_id,
+    runSource: row.run_source,
     imageRef: row.image_ref,
     imageDigest: row.image_digest,
     status: row.status,
     deployedAt: row.deployed_at,
-    rollbackOfRevisionId: row.rollback_of_revision_id
+    rollbackOfRevisionId: row.rollback_of_revision_id,
+    promotedFromRevisionId: row.promoted_from_revision_id,
+    promotedFromTargetId: row.promoted_from_target_id,
+    promotedFromTargetName: row.promoted_from_target_name,
+    promotionApprovalId: row.promotion_approval_id,
+    promotionApprovalStatus: row.promotion_approval_status
+  };
+}
+
+function mapPromotionApprovalSummary(
+  row: PromotionApprovalRow
+): PromotionApprovalSummary {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    projectName: row.project_name,
+    sourceRevisionId: row.source_revision_id,
+    sourceTargetId: row.source_target_id,
+    sourceTargetName: row.source_target_name,
+    destinationTargetId: row.destination_target_id,
+    destinationTargetName: row.destination_target_name,
+    sourceImageRef: row.source_image_ref,
+    sourceImageDigest: row.source_image_digest,
+    requestedBy: row.requested_by,
+    decidedBy: row.decided_by,
+    requestComment: row.request_comment,
+    decisionComment: row.decision_comment,
+    status: row.status,
+    queuedRunId: row.queued_run_id,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at
   };
 }
 
@@ -2528,6 +2994,7 @@ function mapGitHubRepositorySummary(
     owner: row.owner,
     name: row.name,
     fullName: row.full_name,
+    description: row.description,
     defaultBranch: row.default_branch,
     isPrivate: row.is_private,
     isArchived: row.is_archived,

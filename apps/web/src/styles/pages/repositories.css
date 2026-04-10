@@ -1,0 +1,63 @@
+.ao-repositories-grid {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ao-repositories-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr);
+  gap: var(--space-4);
+}
+
+.ao-repositories-card {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ao-installation-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.ao-installation-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  text-align: left;
+}
+
+.ao-installation-item.is-selected,
+.ao-installation-item:hover {
+  background: var(--surface-2);
+}
+
+.ao-installation-item strong,
+.ao-installation-item p {
+  margin: 0;
+}
+
+.ao-table__repository {
+  display: grid;
+  gap: 3px;
+}
+
+.ao-table__repository p {
+  margin: 0;
+  color: var(--text-3);
+}
+
+.ao-table__action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@media (max-width: 1180px) {
+  .ao-repositories-status {
+    grid-template-columns: 1fr;
+  }
+}

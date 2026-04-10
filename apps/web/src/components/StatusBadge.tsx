@@ -1,4 +1,5 @@
 import { titleCase } from "../lib/format";
+import { getStatusTone, StatusDot } from "./StatusDot";
 
 export function StatusBadge(props: {
   status: string | null;
@@ -6,9 +7,11 @@ export function StatusBadge(props: {
 }) {
   const status = props.status ?? "unknown";
   const tone = props.tone ?? "default";
+  const toneClass = getStatusTone(status);
 
   return (
-    <span className={`status-badge status-${status.replace(/\s+/g, "-")} tone-${tone}`}>
+    <span className={`ao-badge ao-badge--${tone} ao-badge--${toneClass}`}>
+      <StatusDot status={status} />
       {titleCase(status)}
     </span>
   );

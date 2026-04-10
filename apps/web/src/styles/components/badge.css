@@ -1,0 +1,100 @@
+.ao-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ao-badge--subtle {
+  background: var(--surface-2);
+}
+
+.ao-badge--default {
+  background: var(--surface-1);
+}
+
+.ao-badge--running {
+  color: var(--accent);
+  background: var(--accent-soft-2);
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--border-default));
+}
+
+.ao-badge--succeeded {
+  color: var(--success-strong);
+  background: var(--success-soft);
+  border-color: color-mix(in srgb, var(--success) 24%, var(--border-default));
+}
+
+.ao-badge--failed {
+  color: var(--danger-strong);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--border-default));
+}
+
+.ao-badge--queued,
+.ao-badge--neutral,
+.ao-badge--cancelled {
+  color: var(--text-2);
+  background: var(--surface-2);
+}
+
+.ao-badge--superseded {
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+  border-color: color-mix(in srgb, var(--warning) 26%, var(--border-default));
+}
+
+.ao-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-4);
+  flex: none;
+}
+
+.ao-status-dot--running {
+  background: var(--accent);
+}
+
+.ao-status-dot--succeeded {
+  background: var(--success);
+}
+
+.ao-status-dot--failed {
+  background: var(--danger);
+}
+
+.ao-status-dot--queued,
+.ao-status-dot--neutral,
+.ao-status-dot--cancelled {
+  background: var(--text-4);
+}
+
+.ao-status-dot--superseded {
+  background: var(--warning);
+}
+
+.ao-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.ao-chip--accent {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border-default));
+  background: var(--accent-soft-2);
+}

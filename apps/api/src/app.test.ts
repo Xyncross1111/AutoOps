@@ -43,6 +43,27 @@ function createDbMock() {
     targetCount: 0,
     latestRunStatus: null
   };
+  const baseManagedTarget = {
+    id: "target-1",
+    projectId: baseProject.id,
+    projectName: baseProject.name,
+    name: "managed-vps",
+    targetType: "managed_vps",
+    environment: "production" as const,
+    promotionOrder: 2,
+    protected: true,
+    hostRef: "managed",
+    composeFile: "/opt/autoops-managed/apps/acme-demo-100/docker-compose.yml",
+    service: "app",
+    healthcheckUrl: "http://acme-demo-100:3000/",
+    managedPort: 6100,
+    managedRuntimeDir: "/opt/autoops-managed/apps/acme-demo-100",
+    managedDomain: null,
+    lastStatus: null,
+    lastDeployedImage: null,
+    lastDeployedAt: null,
+    lastError: null
+  };
 
   return {
     healthcheck: vi.fn().mockResolvedValue(true),
@@ -66,12 +87,14 @@ function createDbMock() {
         queuedRunCount: 2,
         runningRunCount: 1,
         successRate7d: 90,
-        unhealthyTargetCount: 1
+        unhealthyTargetCount: 1,
+        pendingApprovalCount: 0
       },
       attention: {
         latestFailedRun: null,
         activeRuns: [],
-        unhealthyTargets: []
+        unhealthyTargets: [],
+        pendingApprovals: []
       },
       recentRuns: [],
       recentDeployments: [],
@@ -111,6 +134,7 @@ function createDbMock() {
       owner: "acme",
       name: "demo",
       fullName: "acme/demo",
+      description: "AutoOps demo app",
       defaultBranch: "main",
       isPrivate: false,
       isArchived: false,
@@ -151,9 +175,47 @@ function createDbMock() {
       targetCount: 1,
       latestRunStatus: "running"
     }),
+    deleteProject: vi.fn().mockResolvedValue(baseProject),
     listRuns: vi.fn().mockResolvedValue([]),
+    getRun: vi.fn().mockResolvedValue({
+      summary: {
+        id: "run-source",
+        projectId: "project-1",
+        projectName: "Project One",
+        source: "push",
+        branch: "main",
+        commitSha: "abcdef123456",
+        status: "succeeded",
+        queuedAt: new Date().toISOString(),
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        triggeredBy: "admin@autoops.local",
+        errorMessage: null
+      },
+      pipelineConfig: null,
+      metadata: {}
+    }),
     getRunDetail: vi.fn().mockResolvedValue(null),
     listRunLogs: vi.fn().mockResolvedValue([]),
+    getRevision: vi.fn().mockResolvedValue({
+      id: "revision-1",
+      targetId: "target-preview",
+      targetName: "preview:feature-one",
+      projectId: "project-1",
+      projectName: "Project One",
+      runId: "run-source",
+      runSource: "manual_deploy",
+      imageRef: "ghcr.io/acme/demo:preview",
+      imageDigest: "sha256:preview",
+      status: "succeeded",
+      deployedAt: new Date().toISOString(),
+      rollbackOfRevisionId: null,
+      promotedFromRevisionId: null,
+      promotedFromTargetId: null,
+      promotedFromTargetName: null,
+      promotionApprovalId: null,
+      promotionApprovalStatus: null
+    }),
     createRun: vi.fn().mockResolvedValue({
       id: "run-manual",
       projectId: "project-1",
@@ -172,8 +234,62 @@ function createDbMock() {
     rerun: vi.fn().mockResolvedValue({
       id: "run-2"
     }),
-    syncDeploymentTargets: vi.fn().mockResolvedValue([]),
-    listDeploymentTargets: vi.fn().mockResolvedValue([]),
+    syncDeploymentTargets: vi.fn().mockImplementation(async (projectId: string, targets: Array<any>) => (
+      targets.map((target, index) => ({
+        ...baseManagedTarget,
+        id: `target-${index + 1}`,
+        projectId,
+        name: target.name,
+        targetType: target.targetType ?? "ssh_compose",
+        environment: target.environment ?? null,
+        promotionOrder: target.promotionOrder ?? null,
+        protected: target.protected ?? false,
+        hostRef: target.hostRef,
+        composeFile: target.composeFile,
+        service: target.service,
+        healthcheckUrl: target.healthcheckUrl,
+        managedPort: target.managedPort ?? null,
+        managedRuntimeDir: target.managedRuntimeDir ?? null,
+        managedDomain: target.managedDomain ?? null
+      }))
+    )),
+    listDeploymentTargets: vi.fn().mockResolvedValue([baseManagedTarget]),
+    getDeploymentTargetById: vi.fn().mockImplementation(async (targetId: string) => {
+      if (targetId === "target-preview") {
+        return {
+          ...baseManagedTarget,
+          id: "target-preview",
+          name: "preview:feature-one",
+          environment: "preview" as const,
+          promotionOrder: 1,
+          protected: false,
+          managedPort: 6101,
+          managedRuntimeDir: "/opt/autoops-managed/apps/acme-demo-100-preview",
+          healthcheckUrl: "http://acme-demo-100-preview:3000/"
+        };
+      }
+
+      if (targetId === "target-staging") {
+        return {
+          ...baseManagedTarget,
+          id: "target-staging",
+          name: "staging",
+          targetType: "ssh_compose" as const,
+          environment: "staging" as const,
+          promotionOrder: 2,
+          protected: false,
+          hostRef: "staging",
+          composeFile: "/srv/staging/docker-compose.yml",
+          managedPort: null,
+          managedRuntimeDir: null,
+          managedDomain: null,
+          healthcheckUrl: "https://staging.example.com/health",
+          lastDeployedImage: null
+        };
+      }
+
+      return baseManagedTarget;
+    }),
     listDeploymentRevisions: vi.fn().mockResolvedValue([]),
     getDeploymentTargetDetail: vi.fn().mockResolvedValue({
       target: {
@@ -182,6 +298,9 @@ function createDbMock() {
         projectName: "Project One",
         name: "production",
         targetType: "ssh_compose",
+        environment: "production",
+        promotionOrder: 2,
+        protected: true,
         hostRef: "prod",
         composeFile: "/srv/app/docker-compose.yml",
         service: "app",
@@ -197,6 +316,30 @@ function createDbMock() {
       revisions: [],
       linkedRuns: []
     }),
+    findPendingPromotionApproval: vi.fn().mockResolvedValue(null),
+    createPromotionApproval: vi.fn().mockResolvedValue({
+      id: "approval-1",
+      projectId: "project-1",
+      projectName: "Project One",
+      sourceRevisionId: "revision-1",
+      sourceTargetId: "target-preview",
+      sourceTargetName: "preview:feature-one",
+      destinationTargetId: "target-1",
+      destinationTargetName: "managed-vps",
+      sourceImageRef: "ghcr.io/acme/demo:preview",
+      sourceImageDigest: "sha256:preview",
+      requestedBy: config.ADMIN_EMAIL,
+      decidedBy: null,
+      requestComment: null,
+      decisionComment: null,
+      status: "pending",
+      queuedRunId: null,
+      createdAt: new Date().toISOString(),
+      decidedAt: null
+    }),
+    listPromotionApprovals: vi.fn().mockResolvedValue([]),
+    getPromotionApproval: vi.fn().mockResolvedValue(null),
+    decidePromotionApproval: vi.fn().mockResolvedValue(null),
     enqueueRollbackRun: vi.fn().mockResolvedValue({ id: "run-rollback" }),
     listActivityEvents: vi.fn().mockResolvedValue([
       {
@@ -473,6 +616,36 @@ describe("createApp", () => {
     expect(db.updateProject.mock.calls[0][2]).toBe(config.ADMIN_EMAIL);
   });
 
+  it("deletes a project for the authenticated owner", async () => {
+    const db = createDbMock();
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .delete("/api/projects/project-1")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.project.id).toBe("project-1");
+    expect(db.deleteProject).toHaveBeenCalledWith("project-1", config.ADMIN_EMAIL);
+    expect(db.writeAuditLog).toHaveBeenCalledWith(
+      config.ADMIN_EMAIL,
+      "project.deleted",
+      "project",
+      "project-1",
+      expect.objectContaining({
+        projectId: "project-1",
+        projectName: "Project One",
+        repoOwner: "acme",
+        repoName: "demo"
+      })
+    );
+  });
+
   it("returns deployment target detail", async () => {
     const db = createDbMock();
     const app = createApp({
@@ -489,6 +662,267 @@ describe("createApp", () => {
     expect(response.status).toBe(200);
     expect(response.body.target.id).toBe("target-1");
     expect(db.getDeploymentTargetDetail).toHaveBeenCalledWith("target-1", config.ADMIN_EMAIL);
+  });
+
+  it("creates a pending approval for promotions into protected targets", async () => {
+    const db = createDbMock();
+    db.listDeploymentTargets.mockResolvedValue([
+      await db.getDeploymentTargetById("target-preview"),
+      await db.getDeploymentTargetById("target-1")
+    ]);
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/promotions")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        sourceRevisionId: "8f6f67db-6846-4a73-b44f-f63074e03d99",
+        destinationTargetId: "f9bf8411-9c84-4460-bf45-85af7e228bdf"
+      });
+
+    expect(response.status).toBe(202);
+    expect(response.body.mode).toBe("approval_required");
+    expect(db.createPromotionApproval).toHaveBeenCalledTimes(1);
+    expect(db.createRun).not.toHaveBeenCalled();
+  });
+
+  it("queues an immediate promotion for unprotected next-step targets", async () => {
+    const db = createDbMock();
+    db.getDeploymentTargetById.mockImplementation(async (targetId: string) => {
+      if (targetId === "target-preview") {
+        return {
+          ...(await createDbMock().getDeploymentTargetById("target-preview"))
+        };
+      }
+
+      if (targetId === "2d1590f4-5098-455f-8d2d-5945d40a361d") {
+        return {
+          id: "target-staging",
+          projectId: "project-1",
+          projectName: "Project One",
+          name: "staging",
+          targetType: "ssh_compose",
+          environment: "staging",
+          promotionOrder: 2,
+          protected: false,
+          hostRef: "staging",
+          composeFile: "/srv/staging/docker-compose.yml",
+          service: "app",
+          healthcheckUrl: "https://staging.example.com/health",
+          managedPort: null,
+          managedRuntimeDir: null,
+          managedDomain: null,
+          lastStatus: null,
+          lastDeployedImage: null,
+          lastDeployedAt: null,
+          lastError: null
+        };
+      }
+
+      return null;
+    });
+    db.listDeploymentTargets.mockResolvedValue([
+      await db.getDeploymentTargetById("target-preview"),
+      await db.getDeploymentTargetById("2d1590f4-5098-455f-8d2d-5945d40a361d")
+    ]);
+    db.createRun.mockResolvedValue({
+      id: "run-promotion",
+      projectId: "project-1",
+      projectName: "Project One",
+      source: "manual_promotion",
+      branch: "main",
+      commitSha: "abcdef123456",
+      status: "queued",
+      queuedAt: new Date().toISOString(),
+      startedAt: null,
+      finishedAt: null,
+      triggeredBy: config.ADMIN_EMAIL,
+      errorMessage: null
+    });
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/promotions")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        sourceRevisionId: "8f6f67db-6846-4a73-b44f-f63074e03d99",
+        destinationTargetId: "2d1590f4-5098-455f-8d2d-5945d40a361d"
+      });
+
+    expect(response.status).toBe(202);
+    expect(response.body.mode).toBe("queued");
+    expect(db.createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "manual_promotion",
+        metadata: expect.objectContaining({
+          manualPromotion: expect.objectContaining({
+            sourceRevisionId: "revision-1",
+            destinationTargetId: "target-staging"
+          })
+        })
+      })
+    );
+  });
+
+  it("approves a pending promotion and queues a manual promotion run", async () => {
+    const db = createDbMock();
+    db.getPromotionApproval.mockResolvedValue({
+      id: "approval-1",
+      projectId: "project-1",
+      projectName: "Project One",
+      sourceRevisionId: "revision-1",
+      sourceTargetId: "target-preview",
+      sourceTargetName: "preview:feature-one",
+      destinationTargetId: "target-1",
+      destinationTargetName: "managed-vps",
+      sourceImageRef: "ghcr.io/acme/demo:preview",
+      sourceImageDigest: "sha256:preview",
+      requestedBy: config.ADMIN_EMAIL,
+      decidedBy: null,
+      requestComment: null,
+      decisionComment: null,
+      status: "pending",
+      queuedRunId: null,
+      createdAt: new Date().toISOString(),
+      decidedAt: null
+    });
+    db.listDeploymentTargets.mockResolvedValue([
+      await db.getDeploymentTargetById("target-preview"),
+      await db.getDeploymentTargetById("target-1")
+    ]);
+    db.createRun.mockResolvedValue({
+      id: "run-promotion",
+      projectId: "project-1",
+      projectName: "Project One",
+      source: "manual_promotion",
+      branch: "main",
+      commitSha: "abcdef123456",
+      status: "queued",
+      queuedAt: new Date().toISOString(),
+      startedAt: null,
+      finishedAt: null,
+      triggeredBy: config.ADMIN_EMAIL,
+      errorMessage: null
+    });
+    db.decidePromotionApproval.mockResolvedValue({
+      id: "approval-1",
+      projectId: "project-1",
+      projectName: "Project One",
+      sourceRevisionId: "revision-1",
+      sourceTargetId: "target-preview",
+      sourceTargetName: "preview:feature-one",
+      destinationTargetId: "target-1",
+      destinationTargetName: "managed-vps",
+      sourceImageRef: "ghcr.io/acme/demo:preview",
+      sourceImageDigest: "sha256:preview",
+      requestedBy: config.ADMIN_EMAIL,
+      decidedBy: config.ADMIN_EMAIL,
+      requestComment: null,
+      decisionComment: null,
+      status: "approved",
+      queuedRunId: "run-promotion",
+      createdAt: new Date().toISOString(),
+      decidedAt: new Date().toISOString()
+    });
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/approvals/approval-1/approve")
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+
+    expect(response.status).toBe(202);
+    expect(db.createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "manual_promotion"
+      })
+    );
+    expect(db.decidePromotionApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalId: "approval-1",
+        status: "approved",
+        queuedRunId: "run-promotion"
+      })
+    );
+  });
+
+  it("rejects a pending promotion without queueing a run", async () => {
+    const db = createDbMock();
+    db.getPromotionApproval.mockResolvedValue({
+      id: "approval-1",
+      projectId: "project-1",
+      projectName: "Project One",
+      sourceRevisionId: "revision-1",
+      sourceTargetId: "target-preview",
+      sourceTargetName: "preview:feature-one",
+      destinationTargetId: "target-1",
+      destinationTargetName: "managed-vps",
+      sourceImageRef: "ghcr.io/acme/demo:preview",
+      sourceImageDigest: "sha256:preview",
+      requestedBy: config.ADMIN_EMAIL,
+      decidedBy: null,
+      requestComment: null,
+      decisionComment: null,
+      status: "pending",
+      queuedRunId: null,
+      createdAt: new Date().toISOString(),
+      decidedAt: null
+    });
+    db.decidePromotionApproval.mockResolvedValue({
+      id: "approval-1",
+      projectId: "project-1",
+      projectName: "Project One",
+      sourceRevisionId: "revision-1",
+      sourceTargetId: "target-preview",
+      sourceTargetName: "preview:feature-one",
+      destinationTargetId: "target-1",
+      destinationTargetName: "managed-vps",
+      sourceImageRef: "ghcr.io/acme/demo:preview",
+      sourceImageDigest: "sha256:preview",
+      requestedBy: config.ADMIN_EMAIL,
+      decidedBy: config.ADMIN_EMAIL,
+      requestComment: null,
+      decisionComment: null,
+      status: "rejected",
+      queuedRunId: null,
+      createdAt: new Date().toISOString(),
+      decidedAt: new Date().toISOString()
+    });
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/approvals/approval-1/reject")
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(db.createRun).not.toHaveBeenCalled();
+    expect(db.decidePromotionApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalId: "approval-1",
+        status: "rejected"
+      })
+    );
   });
 
   it("returns normalized activity events", async () => {
@@ -523,6 +957,7 @@ describe("createApp", () => {
         owner: "acme",
         name: "demo",
         fullName: "acme/demo",
+        description: "AutoOps demo app",
         defaultBranch: "main",
         isPrivate: false,
         isArchived: false,
@@ -545,6 +980,7 @@ describe("createApp", () => {
         owner: "acme",
         name: "demo",
         fullName: "acme/demo",
+        description: "AutoOps demo app",
         defaultBranch: "main",
         isPrivate: false,
         isArchived: false,
@@ -585,6 +1021,7 @@ describe("createApp", () => {
     expect(db.setGitHubInstallationSyncState).toHaveBeenCalled();
     expect(db.upsertGitHubRepositories).toHaveBeenCalledTimes(1);
     expect(response.body.repositories[0].deployabilityStatus).toBe("deployable");
+    expect(response.body.repositories[0].description).toBe("AutoOps demo app");
   });
 
   it("bootstraps a newly installed GitHub App installation before syncing", async () => {
@@ -644,7 +1081,8 @@ describe("createApp", () => {
         buildCommand: "pnpm build",
         startCommand: "pnpm start",
         nodeVersion: "20",
-        outputPort: 3000
+        outputPort: 3000,
+        outputDirectory: ".next"
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -684,6 +1122,183 @@ describe("createApp", () => {
     expect(db.linkGitHubRepositoryToProject).toHaveBeenCalledWith(1, 100, "project-managed");
   });
 
+  it("imports a deployable React repository into a managed project", async () => {
+    const db = createDbMock();
+    db.getProjectByRepo = vi.fn().mockResolvedValue(null);
+    db.getGitHubRepository.mockResolvedValue({
+      installationId: 1,
+      repoId: 101,
+      owner: "acme",
+      name: "react-demo",
+      fullName: "acme/react-demo",
+      description: "React demo app",
+      defaultBranch: "main",
+      isPrivate: false,
+      isArchived: false,
+      htmlUrl: "https://github.com/acme/react-demo",
+      pushedAt: new Date().toISOString(),
+      analysisStatus: "analyzed",
+      deployabilityStatus: "deployable",
+      deployabilityReason: null,
+      detectedFramework: "react",
+      packageManager: "pnpm",
+      linkedProjectId: null,
+      analyzedAt: new Date().toISOString(),
+      syncedAt: new Date().toISOString()
+    });
+    const createdProject = {
+      id: "project-react",
+      name: "react-demo",
+      repoOwner: "acme",
+      repoName: "react-demo",
+      installationId: 1,
+      mode: "managed_nextjs",
+      githubRepoId: 101,
+      defaultBranch: "main",
+      configPath: ".autoops/pipeline.yml",
+      appSlug: "acme-react-demo-101",
+      primaryUrl: "http://localhost:6100",
+      managedConfig: {
+        framework: "react",
+        packageManager: "pnpm",
+        installCommand: "pnpm install --frozen-lockfile",
+        buildCommand: "pnpm build",
+        startCommand: null,
+        nodeVersion: "20",
+        outputPort: 80,
+        outputDirectory: "dist"
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      targetCount: 1,
+      latestRunStatus: null
+    };
+    db.createProject.mockResolvedValue(createdProject);
+    db.getProject.mockResolvedValue(createdProject);
+
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/github/repositories/import")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        installationId: 1,
+        repoId: 101,
+        owner: "acme",
+        name: "react-demo",
+        defaultBranch: "main"
+      });
+
+    expect(response.status).toBe(201);
+    expect(db.createProject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        githubRepoId: 101,
+        managedConfig: expect.objectContaining({
+          framework: "react",
+          outputPort: 80,
+          outputDirectory: "dist"
+        })
+      })
+    );
+    expect(db.syncDeploymentTargets).toHaveBeenCalledWith(
+      "project-react",
+      expect.arrayContaining([
+        expect.objectContaining({
+          healthcheckUrl: expect.stringContaining(":80/")
+        })
+      ])
+    );
+  });
+
+  it("imports a deployable static HTML repository into a managed project", async () => {
+    const db = createDbMock();
+    db.getProjectByRepo = vi.fn().mockResolvedValue(null);
+    db.getGitHubRepository.mockResolvedValue({
+      installationId: 1,
+      repoId: 102,
+      owner: "acme",
+      name: "landing-page",
+      fullName: "acme/landing-page",
+      description: "Static landing page",
+      defaultBranch: "main",
+      isPrivate: false,
+      isArchived: false,
+      htmlUrl: "https://github.com/acme/landing-page",
+      pushedAt: new Date().toISOString(),
+      analysisStatus: "analyzed",
+      deployabilityStatus: "deployable",
+      deployabilityReason: null,
+      detectedFramework: "static_html",
+      packageManager: null,
+      linkedProjectId: null,
+      analyzedAt: new Date().toISOString(),
+      syncedAt: new Date().toISOString()
+    });
+    const createdProject = {
+      id: "project-static",
+      name: "landing-page",
+      repoOwner: "acme",
+      repoName: "landing-page",
+      installationId: 1,
+      mode: "managed_nextjs",
+      githubRepoId: 102,
+      defaultBranch: "main",
+      configPath: ".autoops/pipeline.yml",
+      appSlug: "acme-landing-page-102",
+      primaryUrl: "http://localhost:6101",
+      managedConfig: {
+        framework: "static_html",
+        packageManager: null,
+        installCommand: null,
+        buildCommand: null,
+        startCommand: null,
+        nodeVersion: null,
+        outputPort: 80,
+        outputDirectory: "."
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      targetCount: 1,
+      latestRunStatus: null
+    };
+    db.createProject.mockResolvedValue(createdProject);
+    db.getProject.mockResolvedValue(createdProject);
+
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: createGithubMock() as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/github/repositories/import")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        installationId: 1,
+        repoId: 102,
+        owner: "acme",
+        name: "landing-page",
+        defaultBranch: "main"
+      });
+
+    expect(response.status).toBe(201);
+    expect(db.createProject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        githubRepoId: 102,
+        managedConfig: expect.objectContaining({
+          framework: "static_html",
+          outputPort: 80
+        })
+      })
+    );
+  });
+
   it("queues an explicit managed deployment for imported projects", async () => {
     const db = createDbMock();
     db.getProject.mockResolvedValue({
@@ -705,7 +1320,8 @@ describe("createApp", () => {
         buildCommand: "pnpm build",
         startCommand: "pnpm start",
         nodeVersion: "20",
-        outputPort: 3000
+        outputPort: 3000,
+        outputDirectory: ".next"
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -742,10 +1358,17 @@ describe("createApp", () => {
           repoAccess: {
             type: "installation",
             installationId: 1
+          },
+          managedDeployment: {
+            targetId: "target-1",
+            targetName: "managed-vps",
+            environment: "production",
+            targetUrl: "http://localhost:6100"
           }
         }
       })
     );
+    expect(response.body.target.id).toBe("target-1");
   });
 
   it("imports an OAuth-connected repository without requiring an app installation", async () => {
@@ -782,7 +1405,8 @@ describe("createApp", () => {
         buildCommand: "pnpm build",
         startCommand: "pnpm start",
         nodeVersion: "20",
-        outputPort: 3000
+        outputPort: 3000,
+        outputDirectory: ".next"
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -804,6 +1428,7 @@ describe("createApp", () => {
         },
         packageManager: "pnpm@9.0.0"
       }))
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null)
@@ -867,7 +1492,8 @@ describe("createApp", () => {
         buildCommand: "pnpm build",
         startCommand: "pnpm start",
         nodeVersion: "20",
-        outputPort: 3000
+        outputPort: 3000,
+        outputDirectory: ".next"
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -912,14 +1538,115 @@ describe("createApp", () => {
       expect.objectContaining({
         projectId: "project-oauth",
         source: "manual_deploy",
+        branch: "main",
         commitSha: "fedcba0987654321",
         metadata: {
           repoAccess: {
             type: "oauth",
             actorEmail: config.ADMIN_EMAIL
+          },
+          managedDeployment: {
+            targetId: "target-1",
+            targetName: "managed-vps",
+            environment: "production",
+            targetUrl: "http://localhost:6100"
           }
         }
       })
     );
+  });
+
+  it("creates a preview target when manually deploying a non-default branch", async () => {
+    const db = createDbMock();
+    db.getProject.mockResolvedValue({
+      id: "project-managed",
+      name: "demo",
+      repoOwner: "acme",
+      repoName: "demo",
+      installationId: 1,
+      mode: "managed_nextjs",
+      githubRepoId: 100,
+      defaultBranch: "main",
+      configPath: ".autoops/pipeline.yml",
+      appSlug: "acme-demo-100",
+      primaryUrl: "http://localhost:6100",
+      managedConfig: {
+        framework: "nextjs",
+        packageManager: "pnpm",
+        installCommand: "pnpm install --frozen-lockfile",
+        buildCommand: "pnpm build",
+        startCommand: "pnpm start",
+        nodeVersion: "20",
+        outputPort: 3000,
+        outputDirectory: ".next"
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      targetCount: 1,
+      latestRunStatus: null
+    });
+    db.listDeploymentTargets.mockResolvedValue([]);
+    db.reserveNextManagedPort.mockResolvedValue(6101);
+    db.syncDeploymentTargets.mockResolvedValue([
+      {
+        id: "target-preview",
+        projectId: "project-managed",
+        projectName: "demo",
+        name: "preview:feature/nav-refresh",
+        targetType: "managed_vps",
+        hostRef: "managed",
+        composeFile: "/opt/autoops-managed/apps/acme-demo-100-feature-nav-refresh-c53e4d7a/docker-compose.yml",
+        service: "app",
+        healthcheckUrl: "http://acme-demo-100-feature-nav-refresh-c53e4d7a:3000/",
+        managedPort: 6101,
+        managedRuntimeDir: "/opt/autoops-managed/apps/acme-demo-100-feature-nav-refresh-c53e4d7a",
+        managedDomain: null,
+        lastStatus: null,
+        lastDeployedImage: null,
+        lastDeployedAt: null,
+        lastError: null
+      }
+    ]);
+    const github = createGithubMock();
+    github.getBranchHeadSha.mockResolvedValue("9999999999999999");
+    const app = createApp({
+      config: config as any,
+      db: db as any,
+      github: github as any
+    });
+    const token = await getBearerToken(app);
+
+    const response = await request(app)
+      .post("/api/projects/project-managed/deploy")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ branch: "feature/nav-refresh" });
+
+    expect(response.status).toBe(202);
+    expect(github.getBranchHeadSha).toHaveBeenCalledWith({
+      installationId: 1,
+      owner: "acme",
+      repo: "demo",
+      branch: "feature/nav-refresh"
+    });
+    expect(db.reserveNextManagedPort).toHaveBeenCalledTimes(1);
+    expect(db.createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        branch: "feature/nav-refresh",
+        commitSha: "9999999999999999",
+        metadata: {
+          repoAccess: {
+            type: "installation",
+            installationId: 1
+          },
+          managedDeployment: {
+            targetId: "target-preview",
+            targetName: "preview:feature/nav-refresh",
+            environment: "preview",
+            targetUrl: "http://localhost:6101"
+          }
+        }
+      })
+    );
+    expect(response.body.target.id).toBe("target-preview");
   });
 });

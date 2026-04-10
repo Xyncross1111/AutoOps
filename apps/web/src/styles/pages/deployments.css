@@ -1,0 +1,58 @@
+.ao-deployments {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ao-target-groups {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ao-target-group {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.ao-target-group h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.ao-target-button {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  text-align: left;
+}
+
+.ao-target-button:hover,
+.ao-target-button.is-selected {
+  background: var(--surface-2);
+}
+
+.ao-target-button strong,
+.ao-target-button p,
+.ao-target-button small {
+  margin: 0;
+}
+
+.ao-deployment-revision {
+  align-items: start;
+}
+
+.ao-deployment-revision__actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 760px) {
+  .ao-deployment-revision {
+    grid-template-columns: 1fr;
+  }
+
+  .ao-deployment-revision__actions {
+    justify-content: flex-start;
+  }
+}

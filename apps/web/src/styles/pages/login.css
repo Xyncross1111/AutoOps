@@ -1,0 +1,151 @@
+.ao-login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+}
+
+.ao-login__frame {
+  width: min(100%, 1040px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
+  gap: var(--space-6);
+  align-items: stretch;
+}
+
+.ao-login__aside,
+.ao-login__card {
+  padding: var(--space-6);
+}
+
+.ao-login__aside {
+  display: grid;
+  align-content: start;
+  gap: var(--space-5);
+}
+
+.ao-login__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.ao-login__brand strong {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.ao-login__lede {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ao-login__lede h1,
+.ao-login__lede p {
+  margin: 0;
+}
+
+.ao-login__lede h1 {
+  font-size: 32px;
+  line-height: 1.05;
+  letter-spacing: -0.05em;
+}
+
+.ao-login__bullets {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ao-login__stats dl {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.ao-login__stats dt {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ao-login__stats dd {
+  margin: 2px 0 0;
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.ao-login__steps {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ao-login__steps ol {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.ao-login__steps li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.ao-login__steps li span {
+  width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  border: 1px solid var(--border-default);
+  color: var(--text-1);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ao-login__steps strong {
+  display: block;
+}
+
+.ao-login__steps p {
+  margin: 6px 0 0;
+  color: var(--text-3);
+}
+
+.ao-login__bullet {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-4);
+}
+
+.ao-login__bullet strong,
+.ao-login__bullet p {
+  margin: 0;
+}
+
+.ao-login__card {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ao-login__tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.ao-login__submit {
+  width: 100%;
+}
+
+@media (max-width: 960px) {
+  .ao-login__frame {
+    grid-template-columns: 1fr;
+  }
+}

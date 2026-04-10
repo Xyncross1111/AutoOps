@@ -1,0 +1,122 @@
+input,
+select,
+textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-1);
+  color: var(--text-1);
+  padding: 0 var(--space-3);
+  min-height: 40px;
+}
+
+textarea {
+  min-height: 120px;
+  padding-top: var(--space-3);
+  padding-bottom: var(--space-3);
+  resize: vertical;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-4);
+}
+
+label {
+  display: grid;
+  gap: var(--space-2);
+}
+
+label > span {
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.ao-search-input {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 40px;
+  min-width: min(100%, 320px);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-1);
+}
+
+.ao-search-input input {
+  border: 0;
+  background: transparent;
+  min-height: 0;
+  padding: 0;
+  box-shadow: none !important;
+}
+
+.ao-search-input--compact {
+  min-width: min(100%, 240px);
+  min-height: 34px;
+}
+
+.ao-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.ao-filter-chip input {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+}
+
+.ao-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--surface-1);
+}
+
+.ao-segmented__item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.ao-segmented__item.is-active {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.ao-form-grid {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ao-form-grid--two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 760px) {
+  .ao-form-grid--two {
+    grid-template-columns: 1fr;
+  }
+}

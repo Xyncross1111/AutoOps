@@ -1,58 +1,67 @@
 import {
   Activity,
+  ClipboardCheck,
   FolderGit2,
   LayoutDashboard,
+  Menu,
   LogOut,
   Moon,
+  Plus,
   PlusCircle,
   RefreshCw,
   Rocket,
   Sun,
   Workflow
 } from "lucide-react";
+import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
-const pageMeta: Record<string, { title: string; subtitle: string }> = {
+const pageMeta: Record<string, { title: string; section: string }> = {
   "/": {
-    title: "Operational Overview",
-    subtitle: "Track platform health, hot spots, and the most important work in motion."
+    title: "Overview",
+    section: "Platform"
   },
   "/runs": {
     title: "Runs",
-    subtitle: "Triage queues, inspect failures, and stream execution detail in one place."
+    section: "Operations"
   },
   "/deployments": {
     title: "Deployments",
-    subtitle: "Monitor target health, revision history, and rollback readiness."
+    section: "Operations"
+  },
+  "/approvals": {
+    title: "Approvals",
+    section: "Operations"
   },
   "/github/connect/callback": {
-    title: "Connecting GitHub",
-    subtitle: "Finalizing the GitHub installation handshake and syncing visible repositories."
+    title: "GitHub Connection",
+    section: "Integrations"
   },
   "/repositories": {
     title: "Repositories",
-    subtitle: "Connect GitHub, sync installations, and review which repos AutoOps can manage."
+    section: "Inventory"
   },
   "/projects": {
     title: "Projects",
-    subtitle: "Manage connected repositories, deployment targets, and setup posture."
+    section: "Inventory"
   },
   "/projects/new": {
-    title: "Repositories",
-    subtitle: "Connect GitHub, sync installations, and review which repos AutoOps can manage."
+    title: "New Project",
+    section: "Inventory"
   },
   "/activity": {
     title: "Activity",
-    subtitle: "Review audit events and GitHub webhook traffic in a unified feed."
+    section: "Audit"
   }
 };
 
 const navItems = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
-  { to: "/runs", label: "Runs", icon: Workflow },
-  { to: "/deployments", label: "Deployments", icon: Rocket },
   { to: "/repositories", label: "Repositories", icon: FolderGit2 },
   { to: "/projects", label: "Projects", icon: FolderGit2 },
+  { to: "/runs", label: "Runs", icon: Workflow },
+  { to: "/approvals", label: "Approvals", icon: ClipboardCheck },
+  { to: "/deployments", label: "Deployments", icon: Rocket },
   { to: "/activity", label: "Activity", icon: Activity }
 ];
 
@@ -62,25 +71,48 @@ export function AppShell(props: {
   onRefresh: () => void;
   onLogout: () => void;
   onToggleTheme: () => void;
+  showGitHubConnect: boolean;
 }) {
   const location = useLocation();
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const meta = pageMeta[location.pathname] ?? {
-    title: "Project Workspace",
-    subtitle: "Inspect and manage the selected AutoOps resource."
+    title: location.pathname.startsWith("/projects/")
+      ? "Project"
+      : location.pathname.startsWith("/runs")
+        ? "Runs"
+        : location.pathname.startsWith("/approvals")
+          ? "Approvals"
+        : "Workspace",
+    section: location.pathname.startsWith("/projects/")
+      ? "Inventory"
+      : location.pathname.startsWith("/runs")
+        ? "Operations"
+        : location.pathname.startsWith("/approvals")
+          ? "Operations"
+        : "AutoOps"
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand-block">
-          <div className="brand-mark">AO</div>
+    <div className="ao-shell">
+      {isSidebarOpen ? (
+        <button
+          aria-label="Close navigation"
+          className="ao-sidebar__backdrop"
+          type="button"
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      ) : null}
+
+      <aside className={`ao-sidebar${isSidebarOpen ? " is-open" : ""}`}>
+        <div className="ao-sidebar__brand">
+          <div className="ao-sidebar__brand-mark">AO</div>
           <div>
             <h1>AutoOps</h1>
-            <p>Control Plane</p>
+            <p>Control plane</p>
           </div>
         </div>
 
-        <nav className="sidebar-nav">
+        <nav className="ao-sidebar__nav" aria-label="Primary">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
@@ -88,9 +120,10 @@ export function AppShell(props: {
                 key={item.to}
                 to={item.to}
                 end={item.end}
-                className={({ isActive }) => (
-                  `nav-link${isActive ? " active" : ""}`
-                )}
+                className={({ isActive }) =>
+                  `ao-sidebar__nav-link${isActive ? " is-active" : ""}`
+                }
+                onClick={() => setIsSidebarOpen(false)}
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
@@ -99,46 +132,75 @@ export function AppShell(props: {
           })}
         </nav>
 
-        <NavLink to="/repositories" className="sidebar-cta">
-          <PlusCircle size={18} />
-          <span>Connect GitHub</span>
-        </NavLink>
+        <div className="ao-sidebar__footer">
+          <NavLink
+            className="ao-link-button ao-link-button--primary"
+            to="/projects/new"
+            onClick={() => setIsSidebarOpen(false)}
+          >
+            <Plus size={16} />
+            <span>New Project</span>
+          </NavLink>
 
-        <div className="sidebar-footer">
-          <span>Signed in as</span>
-          <strong>{props.userEmail}</strong>
-        </div>
-      </aside>
-
-      <div className="shell-main">
-        <header className="shell-header">
-          <div>
-            <p className="eyebrow">Premium operations dashboard</p>
-            <h2>{meta.title}</h2>
-            <p className="header-copy">{meta.subtitle}</p>
+          <div className="ao-sidebar__user">
+            <p>Signed in as</p>
+            <strong>{props.userEmail}</strong>
           </div>
 
-          <div className="header-actions">
-            <button
-              className="theme-toggle ghost"
-              onClick={props.onToggleTheme}
-              aria-label="Toggle theme"
-            >
+          <div className="ao-sidebar__actions">
+            <button className="ao-sidebar__footer-link" onClick={props.onToggleTheme}>
               {props.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
               <span>{props.theme === "dark" ? "Light mode" : "Dark mode"}</span>
             </button>
-            <button className="secondary" onClick={props.onRefresh}>
+            <button className="ao-sidebar__footer-link" onClick={props.onLogout}>
+              <LogOut size={16} />
+              <span>Log out</span>
+            </button>
+            {props.showGitHubConnect ? (
+              <NavLink
+                className="ao-sidebar__footer-link"
+                onClick={() => setIsSidebarOpen(false)}
+                to="/repositories"
+              >
+                <PlusCircle size={16} />
+                <span>Connect GitHub</span>
+              </NavLink>
+            ) : null}
+          </div>
+        </div>
+      </aside>
+
+      <div className="ao-shell__main">
+        <header className="ao-topbar">
+          <div className="ao-topbar__left">
+            <button
+              aria-label="Open navigation"
+              className="ao-button ao-button--secondary ao-topbar__menu"
+              onClick={() => setIsSidebarOpen(true)}
+              type="button"
+            >
+              <Menu size={16} />
+            </button>
+            <div className="ao-topbar__crumb">
+              <span>{meta.section}</span>
+              <span>/</span>
+              <strong>{meta.title}</strong>
+            </div>
+          </div>
+
+          <div className="ao-topbar__right">
+            <button className="ao-button ao-button--secondary" onClick={props.onRefresh}>
               <RefreshCw size={16} />
               <span>Refresh</span>
             </button>
-            <button className="ghost" onClick={props.onLogout}>
-              <LogOut size={16} />
-              <span>Log Out</span>
-            </button>
+            <NavLink className="ao-link-button ao-link-button--secondary" to="/repositories">
+              <FolderGit2 size={16} />
+              <span>Repositories</span>
+            </NavLink>
           </div>
         </header>
 
-        <main className="page-content">
+        <main className="ao-shell__page">
           <Outlet />
         </main>
       </div>

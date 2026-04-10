@@ -1,0 +1,45 @@
+.ao-drawer__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.ao-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 70;
+  width: min(100vw, 440px);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background: var(--surface-1);
+  border-left: 1px solid var(--border-default);
+  box-shadow: var(--shadow-md);
+}
+
+.ao-drawer__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.ao-drawer__header h2,
+.ao-drawer__subtitle {
+  margin: 0;
+}
+
+.ao-drawer__subtitle {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.ao-drawer__body {
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4);
+}

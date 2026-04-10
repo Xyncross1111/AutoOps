@@ -1,11 +1,15 @@
-import { useEffect, useEffectEvent, useState } from "react";
-import type { PipelineRunSummary, RunLogEntry, StageRun } from "@autoops/core";
+import { useEffect, useRef, useState } from "react";
+import type { PipelineRunSummary, RunLogEntry, RunStatus, StageRun } from "@autoops/core";
 
 import { buildRunStreamUrl, getRun } from "../lib/api";
 
 interface RunDetailState {
   run: PipelineRunSummary;
   stages: StageRun[];
+}
+
+function isLiveRunStatus(status: RunStatus) {
+  return status === "queued" || status === "running";
 }
 
 export function useRunStream(
@@ -17,11 +21,11 @@ export function useRunStream(
   const [logs, setLogs] = useState<RunLogEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const onRunUpdateRef = useRef(onRunUpdate);
 
-  const handleRunUpdate = useEffectEvent((run: PipelineRunSummary) => {
-    onRunUpdate(run);
-    setDetail((current) => (current ? { ...current, run } : current));
-  });
+  useEffect(() => {
+    onRunUpdateRef.current = onRunUpdate;
+  }, [onRunUpdate]);
 
   useEffect(() => {
     if (!runId) {
@@ -33,9 +37,54 @@ export function useRunStream(
     }
 
     let cancelled = false;
-    const source = new EventSource(buildRunStreamUrl(runId, token));
+    let source: EventSource | null = null;
+    let latestStatus: RunStatus | null = null;
+
+    const closeSource = () => {
+      if (source) {
+        source.close();
+        source = null;
+      }
+    };
+
+    const handleRunUpdate = (run: PipelineRunSummary) => {
+      latestStatus = run.status;
+      onRunUpdateRef.current(run);
+      setDetail((current) => (current ? { ...current, run } : current));
+
+      if (!isLiveRunStatus(run.status)) {
+        closeSource();
+      }
+    };
+
+    const connectStream = () => {
+      if (source || !latestStatus || !isLiveRunStatus(latestStatus)) {
+        return;
+      }
+
+      source = new EventSource(buildRunStreamUrl(runId, token));
+
+      source.addEventListener("log", (event) => {
+        const parsed = JSON.parse((event as MessageEvent).data) as RunLogEntry;
+        setLogs((current) => (
+          current.some((entry) => entry.id === parsed.id) ? current : [...current, parsed]
+        ));
+      });
+
+      source.addEventListener("status", (event) => {
+        const parsed = JSON.parse((event as MessageEvent).data) as PipelineRunSummary;
+        handleRunUpdate(parsed);
+      });
+
+      source.onerror = () => {
+        if (!cancelled && isLiveRunStatus(latestStatus ?? "queued")) {
+          setError("Live stream disconnected. Refresh to reconnect.");
+        }
+      };
+    };
 
     setIsLoading(true);
+    setDetail(null);
     setError("");
     setLogs([]);
 
@@ -44,16 +93,19 @@ export function useRunStream(
         if (cancelled) {
           return;
         }
+        latestStatus = nextDetail.run.status;
         setDetail({
           run: nextDetail.run,
           stages: nextDetail.stages
         });
         setLogs(nextDetail.logs);
+        connectStream();
       })
       .catch((caughtError: unknown) => {
         if (cancelled) {
           return;
         }
+        setDetail(null);
         setError(caughtError instanceof Error ? caughtError.message : "Failed to load run");
       })
       .finally(() => {
@@ -62,29 +114,11 @@ export function useRunStream(
         }
       });
 
-    source.addEventListener("log", (event) => {
-      const parsed = JSON.parse((event as MessageEvent).data) as RunLogEntry;
-      setLogs((current) => (
-        current.some((entry) => entry.id === parsed.id) ? current : [...current, parsed]
-      ));
-    });
-
-    source.addEventListener("status", (event) => {
-      const parsed = JSON.parse((event as MessageEvent).data) as PipelineRunSummary;
-      handleRunUpdate(parsed);
-    });
-
-    source.onerror = () => {
-      if (!cancelled) {
-        setError("Live stream disconnected. Refresh to reconnect.");
-      }
-    };
-
     return () => {
       cancelled = true;
-      source.close();
+      closeSource();
     };
-  }, [handleRunUpdate, runId, token]);
+  }, [runId, token]);
 
   return {
     detail,
